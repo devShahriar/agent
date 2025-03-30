@@ -113,14 +113,14 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 		},
 	}
 
-	objs, err := loadBpfObjects(opts)
-	if err != nil {
+	var objs bpfObjects
+	if err := loadBpfObjects(&objs, opts); err != nil {
 		if logger != nil {
 			logger.WithError(err).Error("Failed to load BPF objects")
 		}
 		return nil, fmt.Errorf("loading objects: %w", err)
 	}
-	t.objs = objs
+	t.objs = &objs
 
 	// Initialize perf reader for the events map
 	if t.objs.Events != nil {
