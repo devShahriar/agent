@@ -115,7 +115,8 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 	}
 
 	var err error
-	t.objs, err = loadBpfObjects(opts)
+	t.objs = &bpfObjects{}
+	err = loadBpfObjects(t.objs, opts)
 	if err != nil {
 		if logger != nil {
 			logger.WithError(err).Error("Failed to load BPF objects")
