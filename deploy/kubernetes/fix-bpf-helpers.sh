@@ -278,4 +278,18 @@ echo "Dependencies installed successfully!"
 EOF
 
 chmod +x fix-repos.sh
-./fix-repos.sh 
+./fix-repos.sh
+
+# Simple script to fix repository issues and build the agent
+echo "Building abproxy-agent with eBPF tracing..."
+
+# Disable problematic repositories temporarily
+sudo rm -f /etc/apt/sources.list.d/*cuda* /etc/apt/sources.list.d/*nvidia* \
+          /etc/apt/sources.list.d/*kubernetes* /etc/apt/sources.list.d/*mongodb* \
+          /etc/apt/sources.list.d/*teamviewer* /etc/apt/sources.list.d/*yarn* \
+          /etc/apt/sources.list.d/*codeblocks* 2>/dev/null || true
+
+# Now run the existing build script
+sudo ./build-ebpf.sh
+
+echo "Build completed!" 
