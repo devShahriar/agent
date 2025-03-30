@@ -28,7 +28,7 @@ COPY . .
 
 # Download pre-generated vmlinux.h for a common kernel version
 RUN mkdir -p pkg/tracer/bpf && \
-    wget -O pkg/tracer/bpf/vmlinux.h https://raw.githubusercontent.com/libbpf/libbpf-bootstrap/master/vmlinux/vmlinux_5_15.h
+    wget -O pkg/tracer/bpf/vmlinux.h https://raw.githubusercontent.com/aquasecurity/tracee/main/pkg/ebpf/c/vmlinux.h
 
 # Initialize go module and install dependencies
 RUN go mod init abproxy || true && \
