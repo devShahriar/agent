@@ -10,6 +10,7 @@ RUN apt-get update && \
     wget \
     git \
     pkg-config \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Create symlinks for headers
