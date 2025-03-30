@@ -8,7 +8,8 @@ echo "Building abproxy-agent image with REAL eBPF implementation..."
 
 # Create a clean build directory
 mkdir -p real_ebpf_build
-cp -r * real_ebpf_build/
+# Create a list of files to copy, excluding real_ebpf_build
+find . -mindepth 1 -maxdepth 1 -not -name "real_ebpf_build" -exec cp -r {} real_ebpf_build/ \;
 
 # Fix the BPF headers
 cat > real_ebpf_build/pkg/tracer/bpf/headers/bpf_helpers.h << 'EOF'
