@@ -1,7 +1,8 @@
 //+build ignore
 
-#include "headers/bpf_helpers.h"
 #include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
+#include <linux/ptrace.h>
 
 // Maximum size for our data buffer - reduced to fit BPF stack limits
 #define MAX_MSG_SIZE 256
@@ -21,20 +22,12 @@ struct http_event {
     char data[MAX_MSG_SIZE]; // Actual HTTP data
 } __attribute__((packed));
 
-struct bpf_map_def {
-    unsigned int type;
-    unsigned int key_size;
-    unsigned int value_size;
-    unsigned int max_entries;
-    unsigned int map_flags;
-};
-
-struct bpf_map_def SEC("maps") events = {
-    .type = BPF_MAP_TYPE_PERF_EVENT_ARRAY,
-    .key_size = sizeof(int),
-    .value_size = sizeof(int),
-    .max_entries = 1024,
-};
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(int));
+    __uint(value_size, sizeof(int));
+    __uint(max_entries, 1024);
+} events SEC(".maps");
 
 // Attach to SSL_read function
 SEC("uprobe/SSL_read")
@@ -62,9 +55,7 @@ int trace_ssl_read(struct pt_regs *ctx)
     }
     event.data_len = read_len;
     
-    // Copy data with safe size - only do this after SSL_read returns successfully
-    // Here we'd ideally check the return value first but we're reading
-    // the buffer directly which should be populated with data
+    // Copy data with safe size
     bpf_probe_read_user(event.data, read_len, buf);
     
     // Send event to userspace
