@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: abproxy-agent
+  namespace: monitoring
+  labels:
+    app: abproxy-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: abproxy-agent
+  labels:
+    app: abproxy-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces", "nodes", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: abproxy-agent
+  labels:
+    app: abproxy-agent
+subjects:
+  - kind: ServiceAccount
+    name: abproxy-agent
+    namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: abproxy-agent
+  apiGroup: rbac.authorization.k8s.io

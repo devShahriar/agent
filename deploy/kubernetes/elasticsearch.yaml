@@ -35,12 +35,12 @@ spec:
     spec:
       containers:
         - name: elasticsearch
-          image: docker.elastic.co/elasticsearch/elasticsearch:7.17.0
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
           env:
             - name: discovery.type
               value: single-node
             - name: ES_JAVA_OPTS
-              value: -Xms512m -Xmx512m
+              value: "-Xms512m -Xmx512m"
             - name: xpack.security.enabled
               value: "false"
           ports:
@@ -51,17 +51,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /usr/share/elasticsearch/data
-          resources:
-            limits:
-              cpu: 1000m
-              memory: 1Gi
-            requests:
-              cpu: 500m
-              memory: 512Mi
       volumes:
         - name: data
-          persistentVolumeClaim:
-            claimName: elasticsearch-data
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

@@ -101,13 +101,26 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 		procCache:     make(map[uint32]processInfo),
 	}
 
-	// Load pre-compiled programs
-	var objs bpfObjects
-	opts := &ebpf.CollectionOptions{}
-	if err := loadBpfObjects(&objs, opts); err != nil {
+	// Load pre-compiled programs with modified options
+	opts := &ebpf.CollectionOptions{
+		Programs: ebpf.ProgramOptions{
+			LogLevel: 1,
+			LogSize:  65535,
+		},
+		Maps: ebpf.MapOptions{
+			// Pinning is required for some kernels
+			PinPath: "/sys/fs/bpf",
+		},
+	}
+
+	objs, err := loadBpfObjects(opts)
+	if err != nil {
+		if logger != nil {
+			logger.WithError(err).Error("Failed to load BPF objects")
+		}
 		return nil, fmt.Errorf("loading objects: %w", err)
 	}
-	t.objs = &objs
+	t.objs = objs
 
 	// Initialize perf reader for the events map
 	if t.objs.Events != nil {
@@ -127,40 +140,51 @@ func (t *Tracer) Start() error {
 	// Find SSL library
 	sslPath, err := findSSLPath()
 	if err != nil {
-		if t.logger != nil {
-			t.logger.Warn("Finding SSL library: ", err)
-			t.logger.Info("Start method called - using stub implementation")
-		}
-		return nil
+		return fmt.Errorf("finding SSL library: %w", err)
 	}
 
-	// In a real implementation, we would attach to SSL functions
-	if t.objs.TraceSslRead != nil && t.objs.TraceSslWrite != nil {
-		// Attach to SSL/TLS functions
-		ex, err := link.OpenExecutable(sslPath)
-		if err != nil {
-			return fmt.Errorf("opening libssl: %w", err)
-		}
+	// Open the SSL library
+	ex, err := link.OpenExecutable(sslPath)
+	if err != nil {
+		return fmt.Errorf("opening SSL library: %w", err)
+	}
 
-		// Attach to SSL_read
-		readUprobe, err := ex.Uprobe("SSL_read", t.objs.TraceSslRead, nil)
-		if err != nil {
+	// Attach to SSL_read with retries
+	for i := 0; i < 3; i++ {
+		readUprobe, err := ex.Uprobe(
+			"SSL_read",
+			t.objs.TraceSslRead,
+			&link.UprobeOptions{},
+		)
+		if err == nil {
+			t.uprobes = append(t.uprobes, readUprobe)
+			break
+		}
+		if i == 2 {
 			return fmt.Errorf("attaching SSL_read uprobe: %w", err)
 		}
-		t.uprobes = append(t.uprobes, readUprobe)
+		t.logger.WithError(err).Warn("Retrying SSL_read uprobe attachment")
+	}
 
-		// Attach to SSL_write
-		writeUprobe, err := ex.Uprobe("SSL_write", t.objs.TraceSslWrite, nil)
-		if err != nil {
+	// Attach to SSL_write with retries
+	for i := 0; i < 3; i++ {
+		writeUprobe, err := ex.Uprobe(
+			"SSL_write",
+			t.objs.TraceSslWrite,
+			&link.UprobeOptions{},
+		)
+		if err == nil {
+			t.uprobes = append(t.uprobes, writeUprobe)
+			break
+		}
+		if i == 2 {
 			return fmt.Errorf("attaching SSL_write uprobe: %w", err)
 		}
-		t.uprobes = append(t.uprobes, writeUprobe)
-
-		// Start polling for events
-		go t.pollEvents()
-	} else if t.logger != nil {
-		t.logger.Info("Start method called with stub implementation - BPF programs not available")
+		t.logger.WithError(err).Warn("Retrying SSL_write uprobe attachment")
 	}
+
+	// Start polling for events
+	go t.pollEvents()
 
 	return nil
 }

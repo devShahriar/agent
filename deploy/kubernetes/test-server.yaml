@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-server
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-server
+  template:
+    metadata:
+      labels:
+        app: test-server
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - containerPort: 443
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: nginx.conf
+            - name: certs
+              mountPath: /etc/nginx/ssl
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+        - name: certs
+          secret:
+            secretName: nginx-certs
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: monitoring
+data:
+  nginx.conf: |
+    server {
+        listen 443 ssl;
+        server_name localhost;
+
+        ssl_certificate /etc/nginx/ssl/tls.crt;
+        ssl_certificate_key /etc/nginx/ssl/tls.key;
+
+        location / {
+            add_header Content-Type application/json;
+            return 200 '{"message": "Hello from test server", "timestamp": "$time_iso8601"}';
+        }
+
+        location /api/users {
+            add_header Content-Type application/json;
+            return 200 '[{"id": 1, "name": "Test User 1"}, {"id": 2, "name": "Test User 2"}]';
+        }
+
+        location /api/posts {
+            add_header Content-Type application/json;
+            return 200 '[{"id": 1, "title": "Test Post 1"}, {"id": 2, "title": "Test Post 2"}]';
+        }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-server
+  namespace: monitoring
+spec:
+  selector:
+    app: test-server
+  ports:
+    - port: 443
+      targetPort: 443
+  type: ClusterIP
