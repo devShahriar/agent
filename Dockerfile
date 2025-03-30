@@ -7,6 +7,8 @@ RUN apt-get update && \
     clang \
     llvm \
     libbpf-dev \
+    linux-tools-common \
+    linux-tools-generic \
     linux-headers-generic \
     wget \
     git \
@@ -34,13 +36,14 @@ ENV PATH=$PATH:$GOPATH/bin
 WORKDIR /app
 COPY . .
 
+# Generate vmlinux.h
+RUN mkdir -p pkg/tracer/bpf && \
+    bpftool btf dump file /sys/kernel/btf/vmlinux format c > pkg/tracer/bpf/vmlinux.h
+
 # Initialize go module and install dependencies
 RUN go mod init abproxy || true && \
     go mod tidy && \
     go install github.com/cilium/ebpf/cmd/bpf2go@v0.11.0
-
-# Set CFLAGS for BPF compilation
-ENV CFLAGS="-I/usr/include/x86_64-linux-gnu -D__KERNEL__ -D__ASM_SYSREG_H -I/usr/include"
 
 # Generate eBPF code
 RUN cd pkg/tracer && go generate
@@ -52,7 +55,7 @@ RUN go build -o abproxy-agent ./cmd/agent
 FROM ubuntu:22.04
 
 RUN apt-get update && \
-    apt-get install -y libbpf0 && \
+    apt-get install -y libbpf0 linux-tools-common linux-tools-generic && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/abproxy-agent /usr/local/bin/

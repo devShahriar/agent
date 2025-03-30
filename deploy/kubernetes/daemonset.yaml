@@ -18,7 +18,7 @@ spec:
       hostNetwork: true
       containers:
         - name: abproxy-agent
-          image: devshahriar/abproxy-agent:latest
+          image: devshahriar/abproxy-agent:v1.0.0
           imagePullPolicy: Always
           securityContext:
             privileged: true
