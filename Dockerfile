@@ -7,22 +7,12 @@ RUN apt-get update && \
     clang \
     llvm \
     libbpf-dev \
-    linux-tools-common \
-    linux-tools-generic \
     linux-headers-generic \
     wget \
     git \
     pkg-config \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-# Create symlinks for headers
-RUN mkdir -p /usr/include/asm && \
-    ln -s /usr/include/x86_64-linux-gnu/asm/types.h /usr/include/asm/types.h && \
-    ln -s /usr/include/x86_64-linux-gnu/asm/byteorder.h /usr/include/asm/byteorder.h && \
-    ln -s /usr/include/x86_64-linux-gnu/asm/bitsperlong.h /usr/include/asm/bitsperlong.h && \
-    ln -s /usr/include/x86_64-linux-gnu/asm/posix_types.h /usr/include/asm/posix_types.h && \
-    ln -s /usr/include/x86_64-linux-gnu/asm/posix_types_64.h /usr/include/asm/posix_types_64.h
 
 # Install Go
 RUN wget -q https://dl.google.com/go/go1.21.0.linux-amd64.tar.gz && \
@@ -36,9 +26,9 @@ ENV PATH=$PATH:$GOPATH/bin
 WORKDIR /app
 COPY . .
 
-# Generate vmlinux.h
+# Download pre-generated vmlinux.h for a common kernel version
 RUN mkdir -p pkg/tracer/bpf && \
-    bpftool btf dump file /sys/kernel/btf/vmlinux format c > pkg/tracer/bpf/vmlinux.h
+    wget -O pkg/tracer/bpf/vmlinux.h https://raw.githubusercontent.com/libbpf/libbpf-bootstrap/master/vmlinux/vmlinux_5_15.h
 
 # Initialize go module and install dependencies
 RUN go mod init abproxy || true && \
@@ -55,7 +45,7 @@ RUN go build -o abproxy-agent ./cmd/agent
 FROM ubuntu:22.04
 
 RUN apt-get update && \
-    apt-get install -y libbpf0 linux-tools-common linux-tools-generic && \
+    apt-get install -y libbpf0 && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/abproxy-agent /usr/local/bin/
