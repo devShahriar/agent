@@ -11,12 +11,12 @@ rm -rf build_linux
 mkdir -p build_linux
 cp -r $(ls -A | grep -v "build_linux") build_linux/
 
-# Create a simplified BPF program
+# Create a simplified BPF program with VMLinux approach
 cat > build_linux/pkg/tracer/bpf/http_trace.c << 'EOC'
 //+build ignore
 
-#include <linux/bpf.h>
-#include <bpf/bpf_helpers.h>
+#include <stddef.h>
+#include <stdint.h>
 
 // Maximum size for our data buffer - reduced to fit BPF stack limits
 #define MAX_MSG_SIZE 256
@@ -25,14 +25,16 @@ cat > build_linux/pkg/tracer/bpf/http_trace.c << 'EOC'
 #define EVENT_TYPE_SSL_READ  1  // SSL_read event (responses)
 #define EVENT_TYPE_SSL_WRITE 2  // SSL_write event (requests)
 
+#define BPF_MAP_TYPE_PERF_EVENT_ARRAY 4
+
 // Event type for metadata only - small enough for BPF stack
 struct http_event {
-    __u32 pid;          // Process ID
-    __u32 tid;          // Thread ID
-    __u64 timestamp;    // Event timestamp
-    __u8 type;          // Event type (read/write)
-    __u32 data_len;     // Length of the actual data
-    __u32 conn_id;      // Connection ID to correlate request/response
+    uint32_t pid;       // Process ID
+    uint32_t tid;       // Thread ID
+    uint64_t timestamp; // Event timestamp
+    uint8_t type;       // Event type (read/write)
+    uint32_t data_len;  // Length of the actual data
+    uint32_t conn_id;   // Connection ID to correlate request/response
     char data[MAX_MSG_SIZE]; // Actual HTTP data
 } __attribute__((packed));
 
@@ -59,6 +61,19 @@ int trace_ssl_write(void *ctx)
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 EOC
 
+# Create bpf_helpers.h file - simplified helper macros
+cat > build_linux/pkg/tracer/bpf/bpf_helpers.h << 'EOH'
+/* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
+#ifndef __BPF_HELPERS_H
+#define __BPF_HELPERS_H
+
+#define SEC(NAME) __attribute__((section(NAME), used))
+
+#define __uint(name, val) int (*name)[val]
+
+#endif /* __BPF_HELPERS_H */
+EOH
+
 # Create a simplified tracer.go
 cat > build_linux/pkg/tracer/tracer.go << 'EOG'
 package tracer
@@ -69,7 +84,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror" bpf ./bpf/http_trace.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -I./bpf" bpf ./bpf/http_trace.c
 
 // Event types
 const (
@@ -155,7 +170,7 @@ FROM ubuntu:22.04 as builder
 # Avoid prompts from apt
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install dependencies including Linux headers
+# Install basic dependencies without Linux headers
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -167,7 +182,6 @@ RUN apt-get update && \
     clang \
     llvm \
     libbpf-dev \
-    linux-headers-generic \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go 1.21
