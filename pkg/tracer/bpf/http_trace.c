@@ -1,6 +1,7 @@
 //+build ignore
 
 #include "headers/bpf_helpers.h"
+#include <linux/bpf.h>
 
 // Maximum size for our data buffer - reduced to fit BPF stack limits
 #define MAX_MSG_SIZE 256
@@ -20,12 +21,20 @@ struct http_event {
     char data[MAX_MSG_SIZE]; // Actual HTTP data
 } __attribute__((packed));
 
-struct {
-    __type(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-    __type(key, int);
-    __type(value, int);
-    __uint(max_entries, 1024);
-} events SEC(".maps");
+struct bpf_map_def {
+    unsigned int type;
+    unsigned int key_size;
+    unsigned int value_size;
+    unsigned int max_entries;
+    unsigned int map_flags;
+};
+
+struct bpf_map_def SEC("maps") events = {
+    .type = BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+    .key_size = sizeof(int),
+    .value_size = sizeof(int),
+    .max_entries = 1024,
+};
 
 // Attach to SSL_read function
 SEC("uprobe/SSL_read")
