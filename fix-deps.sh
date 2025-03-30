@@ -11,9 +11,14 @@ echo "deb http://archive.ubuntu.com/ubuntu focal main restricted universe multiv
 deb http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse
 deb http://security.ubuntu.com/ubuntu focal-security main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/ubuntu-clean.list
 
-echo "Removing ALL CUDA and NVIDIA packages..."
-sudo apt-get remove -y --purge libcudnn* cuda* nvidia* || true
-sudo apt-get autoremove -y
+# Temporarily disable kernel module updates
+echo "Temporarily disabling automatic kernel updates..."
+sudo mkdir -p /etc/dpkg/dpkg.cfg.d/
+echo 'path-exclude=/lib/modules/*' | sudo tee /etc/dpkg/dpkg.cfg.d/exclude-modules
+echo 'path-exclude=/boot/*' | sudo tee -a /etc/dpkg/dpkg.cfg.d/exclude-modules
+
+echo "Removing CUDA packages (without kernel updates)..."
+DEBIAN_FRONTEND=noninteractive sudo apt-get remove -y libcudnn8 libcudnn8-dev || true
 
 echo "Cleaning package cache..."
 sudo apt-get clean
@@ -22,14 +27,20 @@ sudo apt-get autoclean
 echo "Updating package lists..."
 sudo apt-get update
 
-echo "Installing dependencies one by one..."
-for pkg in build-essential libelf-dev clang-10 libbpf0 libbpf-dev linux-headers-generic; do
-    echo "Installing $pkg..."
-    DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends $pkg || echo "Failed to install $pkg, continuing..."
-done
+echo "Installing minimal dependencies..."
+DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
+    build-essential \
+    clang-10 \
+    libelf-dev \
+    libbpf0 \
+    libbpf-dev
 
 echo "Setting up alternatives for clang..."
 sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-10 100 || true
+
+# Re-enable kernel module updates
+echo "Re-enabling kernel module updates..."
+sudo rm -f /etc/dpkg/dpkg.cfg.d/exclude-modules
 
 echo "Dependencies setup completed!"
 echo "You can now try building the Docker image with:"
