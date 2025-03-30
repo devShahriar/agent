@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
 	"github.com/sirupsen/logrus"
@@ -101,14 +102,14 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 	}
 
 	// Load pre-compiled programs
-	objs, err := loadBpfObjects(nil)
+	opts := &ebpf.CollectionOptions{}
+	objs, err := loadBpfObjects(opts)
 	if err != nil {
 		return nil, fmt.Errorf("loading objects: %w", err)
 	}
 	t.objs = objs
 
-	// Initialize a dummy perfReader for development
-	// In a real implementation, this would be connected to the eBPF map
+	// Initialize perf reader for the events map
 	if t.objs.Events != nil {
 		rd, err := perf.NewReader(t.objs.Events, os.Getpagesize()*16)
 		if err != nil {
