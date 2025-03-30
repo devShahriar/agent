@@ -17,7 +17,10 @@ RUN apt-get update && \
 # Create symlinks for headers
 RUN mkdir -p /usr/include/asm && \
     ln -s /usr/include/x86_64-linux-gnu/asm/types.h /usr/include/asm/types.h && \
-    ln -s /usr/include/x86_64-linux-gnu/asm/byteorder.h /usr/include/asm/byteorder.h
+    ln -s /usr/include/x86_64-linux-gnu/asm/byteorder.h /usr/include/asm/byteorder.h && \
+    ln -s /usr/include/x86_64-linux-gnu/asm/bitsperlong.h /usr/include/asm/bitsperlong.h && \
+    ln -s /usr/include/x86_64-linux-gnu/asm/posix_types.h /usr/include/asm/posix_types.h && \
+    ln -s /usr/include/x86_64-linux-gnu/asm/posix_types_64.h /usr/include/asm/posix_types_64.h
 
 # Install Go
 RUN wget -q https://dl.google.com/go/go1.21.0.linux-amd64.tar.gz && \
@@ -37,7 +40,7 @@ RUN go mod init abproxy || true && \
     go install github.com/cilium/ebpf/cmd/bpf2go@v0.11.0
 
 # Set CFLAGS for BPF compilation
-ENV CFLAGS="-I/usr/include/x86_64-linux-gnu -D__KERNEL__ -D__ASM_SYSREG_H"
+ENV CFLAGS="-I/usr/include/x86_64-linux-gnu -D__KERNEL__ -D__ASM_SYSREG_H -I/usr/include"
 
 # Generate eBPF code
 RUN cd pkg/tracer && go generate
