@@ -1,6 +1,8 @@
 //+build ignore
 
 #include <linux/bpf.h>
+#include <linux/types.h>
+#include <linux/ptrace.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
@@ -32,7 +34,7 @@ struct {
 
 // Function to handle SSL events
 static __always_inline
-int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, size_t count, __u8 event_type) {
+int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, __u32 count, __u8 event_type) {
     struct http_event event = {};
     
     // Get process info
@@ -62,7 +64,7 @@ SEC("uprobe/SSL_read")
 int trace_ssl_read(struct pt_regs *ctx) {
     void *ssl = (void *)PT_REGS_PARM1(ctx);
     void *buf = (void *)PT_REGS_PARM2(ctx);
-    size_t num = (size_t)PT_REGS_PARM3(ctx);
+    __u32 num = (__u32)PT_REGS_PARM3(ctx);
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
 }
@@ -71,7 +73,7 @@ SEC("uprobe/SSL_write")
 int trace_ssl_write(struct pt_regs *ctx) {
     void *ssl = (void *)PT_REGS_PARM1(ctx);
     void *buf = (void *)PT_REGS_PARM2(ctx);
-    size_t num = (size_t)PT_REGS_PARM3(ctx);
+    __u32 num = (__u32)PT_REGS_PARM3(ctx);
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_WRITE);
 }
