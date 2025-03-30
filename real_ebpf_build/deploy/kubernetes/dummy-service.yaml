@@ -1,0 +1,101 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dummy-http-service
+  namespace: default
+  labels:
+    app: dummy-http
+spec:
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
+      name: http
+  selector:
+    app: dummy-http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dummy-http-service
+  namespace: default
+  labels:
+    app: dummy-http
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dummy-http
+  template:
+    metadata:
+      labels:
+        app: dummy-http
+    spec:
+      containers:
+        - name: dummy-http
+          image: kennethreitz/httpbin
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dummy-client
+  namespace: default
+  labels:
+    app: dummy-client
+spec:
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: dummy-client
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dummy-client
+  namespace: default
+  labels:
+    app: dummy-client
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dummy-client
+  template:
+    metadata:
+      labels:
+        app: dummy-client
+    spec:
+      containers:
+        - name: dummy-client
+          image: alpine:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - "/bin/sh"
+            - "-c"
+            - |
+              apk add --no-cache curl
+              while true; do
+                curl -s http://dummy-http-service/get
+                curl -s -X POST -d "data=test" http://dummy-http-service/post
+                sleep 5
+              done
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 50m
+              memory: 32Mi

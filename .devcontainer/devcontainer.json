@@ -1,0 +1,19 @@
+{
+  "name": "Go + eBPF Development",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "devcontainer",
+  "workspaceFolder": "/workspace",
+  "customizations": {
+    "vscode": {
+      "extensions": ["golang.go", "ms-vscode.cpptools", "eamodio.gitlens"],
+      "settings": {
+        "go.toolsManagement.checkForUpdates": "local",
+        "go.useLanguageServer": true,
+        "go.gopath": "/go"
+      }
+    }
+  },
+  "remoteUser": "vscode",
+  "postCreateCommand": "sudo chown vscode:vscode -R /workspace/",
+  "postStartCommand": "go mod tidy"
+}

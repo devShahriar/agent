@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: abproxy-agent
+  namespace: monitoring
+  labels:
+    app: abproxy-agent
+spec:
+  selector:
+    matchLabels:
+      app: abproxy-agent
+  template:
+    metadata:
+      labels:
+        app: abproxy-agent
+    spec:
+      serviceAccountName: abproxy-agent
+      hostPID: true # Required to access processes on the host
+      hostNetwork: true # Optional: access host network
+      containers:
+        - name: abproxy-agent
+          image: docker.io/devshahriar/abproxy-agent:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true # Required for eBPF
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - SYS_PTRACE
+                - NET_ADMIN
+          args:
+            - "--storage=elasticsearch"
+            - "--es-url=http://elasticsearch-service.monitoring.svc.cluster.local:9200"
+            - "--save-events=false"
+          volumeMounts:
+            - name: varrun
+              mountPath: /var/run
+            - name: sys
+              mountPath: /sys
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: data
+              mountPath: /data
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            limits:
+              cpu: 200m
+              memory: 200Mi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+      volumes:
+        - name: varrun
+          hostPath:
+            path: /var/run
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
+        - name: data
+          hostPath:
+            path: /var/lib/abproxy
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: abproxy-agent
+  namespace: monitoring
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: abproxy-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: abproxy-agent
+subjects:
+  - kind: ServiceAccount
+    name: abproxy-agent
+    namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: abproxy-agent
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
