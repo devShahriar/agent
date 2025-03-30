@@ -2,7 +2,16 @@
 
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
-#include <linux/ptrace.h>
+
+// Simple pt_regs structure for accessing function parameters
+struct pt_regs {
+    unsigned long regs[8];  // x86_64 has 8 general purpose registers we care about
+};
+
+// Parameter access macros for x86_64
+#define PT_REGS_PARM1(x) ((x)->regs[0])  // First parameter in rdi
+#define PT_REGS_PARM2(x) ((x)->regs[1])  // Second parameter in rsi
+#define PT_REGS_PARM3(x) ((x)->regs[2])  // Third parameter in rdx
 
 // Maximum size for our data buffer - reduced to fit BPF stack limits
 #define MAX_MSG_SIZE 256
