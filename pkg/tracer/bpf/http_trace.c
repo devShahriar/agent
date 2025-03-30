@@ -1,9 +1,10 @@
 //+build ignore
 
-#include "vmlinux.h"
+#include <linux/bpf.h>
+#include <linux/ptrace.h>
 #include <bpf/bpf_helpers.h>
-#include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
 
 // Maximum size for our data buffer
 #define MAX_MSG_SIZE 256
@@ -61,18 +62,18 @@ int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, __u32 count,
 
 SEC("uprobe/SSL_read")
 int trace_ssl_read(struct pt_regs *ctx) {
-    void *ssl = (void *)PT_REGS_PARM1(ctx);
-    void *buf = (void *)PT_REGS_PARM2(ctx);
-    __u32 num = (__u32)PT_REGS_PARM3(ctx);
+    void *ssl = (void *)PT_REGS_PARM1_CORE(ctx);
+    void *buf = (void *)PT_REGS_PARM2_CORE(ctx);
+    __u32 num = (__u32)PT_REGS_PARM3_CORE(ctx);
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
 }
 
 SEC("uprobe/SSL_write")
 int trace_ssl_write(struct pt_regs *ctx) {
-    void *ssl = (void *)PT_REGS_PARM1(ctx);
-    void *buf = (void *)PT_REGS_PARM2(ctx);
-    __u32 num = (__u32)PT_REGS_PARM3(ctx);
+    void *ssl = (void *)PT_REGS_PARM1_CORE(ctx);
+    void *buf = (void *)PT_REGS_PARM2_CORE(ctx);
+    __u32 num = (__u32)PT_REGS_PARM3_CORE(ctx);
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_WRITE);
 }
