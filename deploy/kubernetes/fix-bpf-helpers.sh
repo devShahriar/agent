@@ -21,11 +21,22 @@ sudo rm -f /etc/apt/sources.list.d/*google*
 echo "Updating package lists..."
 sudo apt-get update || true
 
+# Fix broken packages first
+echo "Fixing broken packages..."
+sudo apt-get -f install -y
+sudo apt-get update
+
+# Clean and remove conflicting packages
+echo "Removing potentially conflicting packages..."
+sudo apt-get remove -y clang llvm libelf-dev libbpf-dev || true
+sudo apt-get autoremove -y
+sudo apt-get clean
+
 # Install required dependencies
 echo "Installing dependencies..."
 sudo apt-get install -y \
     git build-essential pkg-config \
-    libelf-dev clang llvm \
+    libelf-dev clang-10 llvm-10 \
     libbpf-dev linux-headers-$(uname -r)
 
 # Create a clean build directory
