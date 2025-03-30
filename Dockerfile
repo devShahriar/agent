@@ -6,10 +6,9 @@ RUN apt-get update && apt-get install -y \
     clang \
     llvm \
     libbpf-dev \
-    linux-tools-common \
-    linux-tools-generic \
     golang \
     git \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -17,8 +16,9 @@ WORKDIR /app
 # Copy source code
 COPY . .
 
-# Generate vmlinux.h
-RUN bpftool btf dump file /sys/kernel/btf/vmlinux format c > pkg/tracer/bpf/vmlinux.h
+# Download pre-generated vmlinux.h (for kernel 5.15)
+RUN mkdir -p pkg/tracer/bpf && \
+    wget -O pkg/tracer/bpf/vmlinux.h https://raw.githubusercontent.com/aquasecurity/tracee/main/pkg/ebpf/c/vmlinux.h
 
 # Build agent
 RUN cd pkg/tracer && go generate
@@ -27,8 +27,7 @@ RUN go build -o abproxy-agent ./cmd/agent
 FROM ubuntu:22.04
 
 RUN apt-get update && apt-get install -y \
-    linux-tools-common \
-    linux-tools-generic \
+    libbpf0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/abproxy-agent /usr/local/bin/
