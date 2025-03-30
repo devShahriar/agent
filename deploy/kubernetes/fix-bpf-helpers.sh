@@ -6,6 +6,14 @@ IMAGE_NAME="docker.io/devshahriar/abproxy-agent:latest"
 
 echo "Building abproxy-agent image with eBPF on Linux..."
 
+# Install required dependencies first
+echo "Installing dependencies..."
+sudo apt-get update
+sudo apt-get install -y \
+    git build-essential pkg-config \
+    libelf-dev clang llvm \
+    libbpf-dev linux-headers-$(uname -r)
+
 # Create a clean build directory
 rm -rf build_linux
 mkdir -p build_linux
@@ -167,6 +175,7 @@ RUN apt-get update && \
     clang \
     llvm \
     libbpf-dev \
+    linux-headers-generic \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go 1.21
@@ -218,6 +227,14 @@ RUN apt-get update && \
 WORKDIR /app
 COPY --from=builder /app/abproxy-agent .
 
+# Set capabilities for eBPF operations
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libcap2-bin && \
+    setcap cap_sys_admin,cap_bpf,cap_net_admin,cap_perfmon+eip /app/abproxy-agent && \
+    apt-get remove -y libcap2-bin && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
 ENTRYPOINT ["/app/abproxy-agent"]
 EOD
 
@@ -249,47 +266,4 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo "Updated deploy/kubernetes/daemonset.yaml with the image reference."
 fi
 
-echo "Done!"
-
-# Create a temporary script to fix repository issues
-cat > fix-repos.sh << 'EOF'
-#!/bin/bash
-set -e
-
-# Clean problematic sources
-sudo rm -f /etc/apt/sources.list.d/*cuda*
-sudo rm -f /etc/apt/sources.list.d/*nvidia*
-sudo rm -f /etc/apt/sources.list.d/*kubernetes*
-sudo rm -f /etc/apt/sources.list.d/*mongodb*
-sudo rm -f /etc/apt/sources.list.d/*teamviewer*
-sudo rm -f /etc/apt/sources.list.d/*yarn*
-sudo rm -f /etc/apt/sources.list.d/*codeblocks*
-
-# Update package lists
-sudo apt-get update
-
-# Continue with installing dependencies
-sudo apt-get install -y \
-    git build-essential pkg-config \
-    libelf-dev clang llvm \
-    libbpf-dev linux-headers-$(uname -r)
-
-echo "Dependencies installed successfully!"
-EOF
-
-chmod +x fix-repos.sh
-./fix-repos.sh
-
-# Simple script to fix repository issues and build the agent
-echo "Building abproxy-agent with eBPF tracing..."
-
-# Disable problematic repositories temporarily
-sudo rm -f /etc/apt/sources.list.d/*cuda* /etc/apt/sources.list.d/*nvidia* \
-          /etc/apt/sources.list.d/*kubernetes* /etc/apt/sources.list.d/*mongodb* \
-          /etc/apt/sources.list.d/*teamviewer* /etc/apt/sources.list.d/*yarn* \
-          /etc/apt/sources.list.d/*codeblocks* 2>/dev/null || true
-
-# Now run the existing build script
-sudo ./build-ebpf.sh
-
-echo "Build completed!" 
+echo "Done! You can now deploy with: kubectl apply -f deploy/kubernetes/daemonset.yaml" 
