@@ -249,4 +249,33 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo "Updated deploy/kubernetes/daemonset.yaml with the image reference."
 fi
 
-echo "Done!" 
+echo "Done!"
+
+# Create a temporary script to fix repository issues
+cat > fix-repos.sh << 'EOF'
+#!/bin/bash
+set -e
+
+# Clean problematic sources
+sudo rm -f /etc/apt/sources.list.d/*cuda*
+sudo rm -f /etc/apt/sources.list.d/*nvidia*
+sudo rm -f /etc/apt/sources.list.d/*kubernetes*
+sudo rm -f /etc/apt/sources.list.d/*mongodb*
+sudo rm -f /etc/apt/sources.list.d/*teamviewer*
+sudo rm -f /etc/apt/sources.list.d/*yarn*
+sudo rm -f /etc/apt/sources.list.d/*codeblocks*
+
+# Update package lists
+sudo apt-get update
+
+# Continue with installing dependencies
+sudo apt-get install -y \
+    git build-essential pkg-config \
+    libelf-dev clang llvm \
+    libbpf-dev linux-headers-$(uname -r)
+
+echo "Dependencies installed successfully!"
+EOF
+
+chmod +x fix-repos.sh
+./fix-repos.sh 
