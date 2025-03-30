@@ -20,11 +20,11 @@ struct http_event {
     char data[MAX_MSG_SIZE]; // Actual HTTP data
 } __attribute__((packed));
 
-// Maps definition
 struct {
-    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-    __uint(key_size, sizeof(int));
-    __uint(value_size, sizeof(int));
+    __type(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __type(key, int);
+    __type(value, int);
+    __uint(max_entries, 1024);
 } events SEC(".maps");
 
 // Attach to SSL_read function
