@@ -6,9 +6,23 @@ IMAGE_NAME="docker.io/devshahriar/abproxy-agent:latest"
 
 echo "Building abproxy-agent image with eBPF on Linux..."
 
-# Install required dependencies first
+# Clean up problematic repositories first
+echo "Cleaning up problematic repositories..."
+sudo rm -f /etc/apt/sources.list.d/*cuda*
+sudo rm -f /etc/apt/sources.list.d/*nvidia*
+sudo rm -f /etc/apt/sources.list.d/*kubernetes*
+sudo rm -f /etc/apt/sources.list.d/*mongodb*
+sudo rm -f /etc/apt/sources.list.d/*teamviewer*
+sudo rm -f /etc/apt/sources.list.d/*yarn*
+sudo rm -f /etc/apt/sources.list.d/*codeblocks*
+sudo rm -f /etc/apt/sources.list.d/*google*
+
+# Update package lists after cleanup
+echo "Updating package lists..."
+sudo apt-get update || true
+
+# Install required dependencies
 echo "Installing dependencies..."
-sudo apt-get update
 sudo apt-get install -y \
     git build-essential pkg-config \
     libelf-dev clang llvm \
