@@ -8,7 +8,6 @@ RUN apt-get update && \
     llvm \
     libbpf-dev \
     linux-headers-generic \
-    linux-tools-generic \
     wget \
     git \
     pkg-config \
@@ -27,18 +26,21 @@ ENV PATH=$PATH:$GOPATH/bin
 WORKDIR /app
 COPY . .
 
-# Download pre-generated vmlinux.h and set up BPF headers
-RUN mkdir -p pkg/tracer/bpf && \
-    wget -O pkg/tracer/bpf/vmlinux.h https://raw.githubusercontent.com/aquasecurity/tracee/main/pkg/ebpf/c/vmlinux.h && \
-    ln -s /usr/include/bpf /usr/include/linux/bpf
+# Set up BPF headers
+RUN ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm && \
+    ln -sf /usr/include/x86_64-linux-gnu/bits /usr/include/bits && \
+    ln -sf /usr/include/x86_64-linux-gnu/sys /usr/include/sys && \
+    ln -sf /usr/include/x86_64-linux-gnu/linux /usr/include/linux && \
+    ln -sf /usr/include/x86_64-linux-gnu/generated /usr/include/generated
 
 # Initialize go module and install dependencies
 RUN go mod init abproxy || true && \
     go mod tidy && \
     go install github.com/cilium/ebpf/cmd/bpf2go@v0.11.0
 
-# Generate eBPF code
-RUN cd pkg/tracer && go generate
+# Generate eBPF code with correct flags
+RUN cd pkg/tracer && \
+    CFLAGS="-I/usr/include/x86_64-linux-gnu" go generate
 
 # Build the agent
 RUN go build -o abproxy-agent ./cmd/agent

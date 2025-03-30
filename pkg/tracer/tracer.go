@@ -14,7 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -I./bpf" bpf ./bpf/http_trace.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86 -I/usr/include/x86_64-linux-gnu -DBPF_NO_PRESERVE_ACCESS_INDEX" bpf ./bpf/http_trace.c
 
 // Event types
 const (
@@ -107,20 +107,21 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 			LogLevel: 1,
 			LogSize:  65535,
 		},
-		Maps: ebpf.MapOptions{
-			// Pinning is required for some kernels
-			PinPath: "/sys/fs/bpf",
-		},
 	}
 
-	var objs bpfObjects
-	if err := loadBpfObjects(&objs, opts); err != nil {
+	// Create directory for pinned maps if it doesn't exist
+	if err := os.MkdirAll("/sys/fs/bpf/abproxy", 0755); err != nil {
+		logger.WithError(err).Warn("Failed to create BPF filesystem directory")
+	}
+
+	var err error
+	t.objs, err = loadBpfObjects(opts)
+	if err != nil {
 		if logger != nil {
 			logger.WithError(err).Error("Failed to load BPF objects")
 		}
 		return nil, fmt.Errorf("loading objects: %w", err)
 	}
-	t.objs = &objs
 
 	// Initialize perf reader for the events map
 	if t.objs.Events != nil {
@@ -137,6 +138,10 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 
 // Start begins tracing HTTP traffic
 func (t *Tracer) Start() error {
+	if t.logger != nil {
+		t.logger.Info("Starting HTTP traffic tracer...")
+	}
+
 	// Find SSL library
 	sslPath, err := findSSLPath()
 	if err != nil {
@@ -255,40 +260,28 @@ func parseHTTPData(event *HTTPEvent) {
 // pollEvents reads events from the perf buffer
 func (t *Tracer) pollEvents() {
 	var event HTTPEvent
-
 	for {
 		select {
 		case <-t.stopChan:
 			return
 		default:
-			if t.perfReader == nil {
-				if t.logger != nil {
-					t.logger.Info("Perf reader not available")
-				}
-				return
-			}
-
 			record, err := t.perfReader.Read()
 			if err != nil {
-				if err == perf.ErrClosed {
-					return
+				if t.logger != nil {
+					t.logger.WithError(err).Error("Error reading from perf buffer")
 				}
-				t.logger.WithError(err).Error("Error reading perf event")
-				continue
-			}
-
-			if record.LostSamples != 0 {
-				t.logger.WithField("lost", record.LostSamples).Warn("Lost samples")
 				continue
 			}
 
 			// Parse the raw event
 			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
-				t.logger.WithError(err).Error("Error parsing event")
+				if t.logger != nil {
+					t.logger.WithError(err).Error("Error parsing event")
+				}
 				continue
 			}
 
-			// Get process information
+			// Get process info
 			event.ProcessName, event.Command = t.getProcessInfo(event.PID)
 
 			// Parse HTTP data
@@ -316,7 +309,7 @@ func (t *Tracer) pollEvents() {
 				}
 			}
 
-			// Call the callback with the event
+			// Call the callback
 			if t.eventCallback != nil {
 				t.eventCallback(event)
 			}
@@ -324,28 +317,30 @@ func (t *Tracer) pollEvents() {
 	}
 }
 
-// Stop stops the tracer
+// Stop stops tracing HTTP traffic
 func (t *Tracer) Stop() error {
 	close(t.stopChan)
-	if t.perfReader != nil {
-		t.perfReader.Close()
-	}
-
-	// Close all uprobes
-	for _, uprobe := range t.uprobes {
-		uprobe.Close()
-	}
-
 	return nil
 }
 
 // Close cleans up resources
 func (t *Tracer) Close() error {
-	if err := t.Stop(); err != nil {
-		return err
+	t.Stop()
+
+	// Clean up uprobes
+	for _, uprobe := range t.uprobes {
+		uprobe.Close()
 	}
+
+	// Close perf reader
+	if t.perfReader != nil {
+		t.perfReader.Close()
+	}
+
+	// Close BPF objects
 	if t.objs != nil {
-		return t.objs.Close()
+		t.objs.Close()
 	}
+
 	return nil
 }

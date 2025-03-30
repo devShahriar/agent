@@ -1,8 +1,7 @@
 //+build ignore
 
-#include "vmlinux.h"
+#include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
-#include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
 
 // Maximum size for our data buffer
@@ -33,7 +32,7 @@ struct {
 
 // Function to handle SSL events
 static __always_inline
-int handle_ssl_event(struct bpf_probe_ctx *ctx, void *ssl_ctx, void *buf, size_t count, __u8 event_type) {
+int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, size_t count, __u8 event_type) {
     struct http_event event = {};
     
     // Get process info
@@ -60,15 +59,24 @@ int handle_ssl_event(struct bpf_probe_ctx *ctx, void *ssl_ctx, void *buf, size_t
 }
 
 SEC("uprobe/SSL_read")
-int BPF_UPROBE(ssl_read, void *ssl, void *buf, int num) {
-    struct bpf_probe_ctx *ctx = (struct bpf_probe_ctx *)bpf_get_context();
+int trace_ssl_read(struct pt_regs *ctx) {
+    void *ssl = (void *)PT_REGS_PARM1(ctx);
+    void *buf = (void *)PT_REGS_PARM2(ctx);
+    size_t num = (size_t)PT_REGS_PARM3(ctx);
+    
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
 }
 
 SEC("uprobe/SSL_write")
-int BPF_UPROBE(ssl_write, void *ssl, void *buf, int num) {
-    struct bpf_probe_ctx *ctx = (struct bpf_probe_ctx *)bpf_get_context();
+int trace_ssl_write(struct pt_regs *ctx) {
+    void *ssl = (void *)PT_REGS_PARM1(ctx);
+    void *buf = (void *)PT_REGS_PARM2(ctx);
+    size_t num = (size_t)PT_REGS_PARM3(ctx);
+    
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_WRITE);
 }
+
+// Version information to avoid vDSO lookup
+volatile const unsigned long bpf_prog_version __attribute__((section("version"))) = 0;
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
