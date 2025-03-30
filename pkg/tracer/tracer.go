@@ -102,12 +102,12 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 	}
 
 	// Load pre-compiled programs
+	var objs bpfObjects
 	opts := &ebpf.CollectionOptions{}
-	objs, err := loadBpfObjects(opts)
-	if err != nil {
+	if err := loadBpfObjects(&objs, opts); err != nil {
 		return nil, fmt.Errorf("loading objects: %w", err)
 	}
-	t.objs = objs
+	t.objs = &objs
 
 	// Initialize perf reader for the events map
 	if t.objs.Events != nil {
