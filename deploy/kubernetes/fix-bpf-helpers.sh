@@ -176,7 +176,14 @@ RUN apt-get update && \
     llvm \
     libbpf-dev \
     linux-headers-generic \
+    linux-headers-$(uname -r) \
+    linux-tools-generic \
+    linux-tools-common \
+    gcc-multilib \
     && rm -rf /var/lib/apt/lists/*
+
+# Set KBUILD flags for BPF compilation
+ENV KBUILD_INCLUDE=/usr/include
 
 # Install Go 1.21
 RUN wget -q https://dl.google.com/go/go1.21.0.linux-amd64.tar.gz && \
@@ -194,6 +201,10 @@ WORKDIR /app
 # Copy source code
 COPY . .
 
+# Create symlink for asm/types.h
+RUN mkdir -p /usr/include/asm && \
+    ln -s /usr/include/x86_64-linux-gnu/asm/types.h /usr/include/asm/types.h
+
 # Initialize go module and install dependencies
 RUN go mod init abproxy || true && \
     go mod edit -go=1.21 && \
@@ -208,7 +219,8 @@ RUN go mod init abproxy || true && \
 RUN go install github.com/cilium/ebpf/cmd/bpf2go@v0.11.0
 
 # Generate eBPF code
-RUN cd pkg/tracer && go generate
+RUN cd pkg/tracer && \
+    CFLAGS="-I/usr/include/x86_64-linux-gnu" go generate
 
 # Build the agent
 RUN go build -o abproxy-agent ./cmd/agent
