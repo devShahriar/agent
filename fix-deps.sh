@@ -11,11 +11,9 @@ echo "deb http://archive.ubuntu.com/ubuntu focal main restricted universe multiv
 deb http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse
 deb http://security.ubuntu.com/ubuntu focal-security main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/ubuntu-clean.list
 
-echo "Fixing package dependencies..."
-sudo apt --fix-broken install -y
-
-echo "Removing problematic CUDA packages..."
-sudo apt-get remove -y libcudnn8-dev || true
+echo "Removing ALL CUDA and NVIDIA packages..."
+sudo apt-get remove -y --purge libcudnn* cuda* nvidia* || true
+sudo apt-get autoremove -y
 
 echo "Cleaning package cache..."
 sudo apt-get clean
@@ -27,11 +25,11 @@ sudo apt-get update
 echo "Installing dependencies one by one..."
 for pkg in build-essential libelf-dev clang-10 libbpf0 libbpf-dev linux-headers-generic; do
     echo "Installing $pkg..."
-    sudo apt-get install -y $pkg || echo "Failed to install $pkg, continuing..."
+    DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends $pkg || echo "Failed to install $pkg, continuing..."
 done
 
 echo "Setting up alternatives for clang..."
-sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-10 100
+sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-10 100 || true
 
 echo "Dependencies setup completed!"
 echo "You can now try building the Docker image with:"
