@@ -109,20 +109,23 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 		},
 	}
 
-	// Create directory for pinned maps if it doesn't exist
+	// Create BPF filesystem mount if it doesn't exist
+	if err := os.MkdirAll("/sys/fs/bpf", 0755); err != nil {
+		logger.WithError(err).Warn("Failed to create BPF filesystem root")
+	}
 	if err := os.MkdirAll("/sys/fs/bpf/abproxy", 0755); err != nil {
 		logger.WithError(err).Warn("Failed to create BPF filesystem directory")
 	}
 
-	var err error
-	t.objs = &bpfObjects{}
-	err = loadBpfObjects(t.objs, opts)
+	// Load BPF objects
+	objs, err := loadBpfObjects(opts)
 	if err != nil {
 		if logger != nil {
 			logger.WithError(err).Error("Failed to load BPF objects")
 		}
 		return nil, fmt.Errorf("loading objects: %w", err)
 	}
+	t.objs = objs
 
 	// Initialize perf reader for the events map
 	if t.objs.Events != nil {

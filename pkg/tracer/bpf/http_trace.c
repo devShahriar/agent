@@ -1,9 +1,8 @@
 //+build ignore
 
-#include <linux/bpf.h>
-#include <linux/types.h>
-#include <linux/ptrace.h>
+#include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
+#include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
 
 // Maximum size for our data buffer
@@ -77,8 +76,5 @@ int trace_ssl_write(struct pt_regs *ctx) {
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_WRITE);
 }
-
-// Version information to avoid vDSO lookup
-volatile const unsigned long bpf_prog_version __attribute__((section("version"))) = 0;
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
