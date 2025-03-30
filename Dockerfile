@@ -1,52 +1,41 @@
 FROM ubuntu:22.04 as builder
 
-# Avoid prompts from apt
-ENV DEBIAN_FRONTEND=noninteractive
-
 # Install dependencies
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates \
-    wget \
-    git \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential \
-    pkg-config \
-    libelf-dev \
     clang \
-    llvm \
     libbpf-dev \
     linux-headers-generic \
-    linux-libc-dev \
+    wget \
+    git \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Go 1.21
+# Create symlinks for headers
+RUN mkdir -p /usr/include/asm && \
+    ln -s /usr/include/x86_64-linux-gnu/asm/types.h /usr/include/asm/types.h && \
+    ln -s /usr/include/x86_64-linux-gnu/asm/byteorder.h /usr/include/asm/byteorder.h
+
+# Install Go
 RUN wget -q https://dl.google.com/go/go1.21.0.linux-amd64.tar.gz && \
     tar -C /usr/local -xzf go1.21.0.linux-amd64.tar.gz && \
     rm go1.21.0.linux-amd64.tar.gz
 
-# Add Go to PATH
 ENV PATH=$PATH:/usr/local/go/bin
 ENV GOPATH=/go
 ENV PATH=$PATH:$GOPATH/bin
 
-# Set working directory
 WORKDIR /app
-
-# Copy source code
 COPY . .
 
 # Initialize go module and install dependencies
 RUN go mod init abproxy || true && \
-    go mod edit -go=1.21 && \
-    go get github.com/cilium/ebpf@v0.11.0 && \
-    go get github.com/cilium/ebpf/link@v0.11.0 && \
-    go get github.com/cilium/ebpf/perf@v0.11.0 && \
-    go get github.com/sirupsen/logrus@v1.9.3 && \
-    go get golang.org/x/sys@v0.15.0 && \
-    go mod tidy
+    go mod tidy && \
+    go install github.com/cilium/ebpf/cmd/bpf2go@v0.11.0
 
-# Install bpf2go
-RUN go install github.com/cilium/ebpf/cmd/bpf2go@v0.11.0
+# Set CFLAGS for BPF compilation
+ENV CFLAGS="-I/usr/include/x86_64-linux-gnu -D__KERNEL__ -D__ASM_SYSREG_H"
 
 # Generate eBPF code
 RUN cd pkg/tracer && go generate
@@ -57,18 +46,18 @@ RUN go build -o abproxy-agent ./cmd/agent
 # Final stage
 FROM ubuntu:22.04
 
-# Install runtime dependencies
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates \
-    libelf1 \
-    libbpf0 \
-    && rm -rf /var/lib/apt/lists/*
+    apt-get install -y libbpf0 && \
+    rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-COPY --from=builder /app/abproxy-agent .
+COPY --from=builder /app/abproxy-agent /usr/local/bin/
 
-# Run as non-root user (but will be overridden in Kubernetes)
-USER 1000
+# Add eBPF capabilities
+RUN apt-get update && \
+    apt-get install -y libcap2-bin && \
+    setcap cap_bpf,cap_net_admin,cap_perfmon+eip /usr/local/bin/abproxy-agent && \
+    apt-get remove -y libcap2-bin && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 
-ENTRYPOINT ["/app/abproxy-agent"] 
+ENTRYPOINT ["/usr/local/bin/abproxy-agent"] 
