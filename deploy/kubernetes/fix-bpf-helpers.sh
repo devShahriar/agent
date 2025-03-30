@@ -4,103 +4,19 @@ set -e
 # Configuration
 IMAGE_NAME="docker.io/devshahriar/abproxy-agent:latest"
 
-echo "Building abproxy-agent image for Kubernetes..."
+echo "Building abproxy-agent image with eBPF on Linux..."
 
-# Make sure the dev environment is up
-docker-compose up -d
+# Create a clean build directory
+rm -rf build_linux
+mkdir -p build_linux
+cp -r $(ls -A | grep -v "build_linux") build_linux/
 
-# Fix the BPF helpers header file
-echo "Fixing eBPF header file in the container..."
-docker-compose exec -T dev bash -c "cd /app && cat > pkg/tracer/bpf/headers/bpf_helpers.h << 'EOF'
-#ifndef __BPF_HELPERS_H
-#define __BPF_HELPERS_H
-
-/* Basic type definitions */
-typedef unsigned char __u8;
-typedef signed char __s8;
-typedef unsigned short __u16;
-typedef signed short __s16;
-typedef unsigned int __u32;
-typedef signed int __s32;
-typedef unsigned long long __u64;
-typedef signed long long __s64;
-
-/* Map type definitions */
-#define BPF_MAP_TYPE_ARRAY 2
-#define BPF_MAP_TYPE_PERF_EVENT_ARRAY 4
-
-/* Other constants */
-#define BPF_F_CURRENT_CPU 0xffffffffULL
-
-/* Helper macro to place programs, maps, license in
- * different sections in elf_bpf file. Section names
- * are interpreted by elf_bpf loader
- */
-#define SEC(NAME) __attribute__((section(NAME), used))
-
-/* BPF map definition macros for Cilium's bpf2go */
-#define __uint(name, val) int name __attribute__((section(".maps"))) = val
-#define __type(name, val) typeof(val) *name __attribute__((section(".maps")))
-#define __array(name, val) typeof(val) *name[] __attribute__((section(".maps")))
-
-/* PT_REGS structure for uprobe parameters */
-struct pt_regs {
-    __u64 regs[8];  /* Simplified registers array */
-};
-
-/* Parameter access macros */
-#define PT_REGS_PARM1(x) ((x)->regs[0])
-#define PT_REGS_PARM2(x) ((x)->regs[1])
-#define PT_REGS_PARM3(x) ((x)->regs[2])
-#define PT_REGS_PARM4(x) ((x)->regs[3])
-#define PT_REGS_PARM5(x) ((x)->regs[4])
-
-/* Helper functions called from eBPF programs written in C */
-/* BPF_FUNC_* values are placeholders - the actual values
-   will be determined by the BPF verifier */
-#define BPF_FUNC_map_lookup_elem 1
-#define BPF_FUNC_map_update_elem 2
-#define BPF_FUNC_map_delete_elem 3
-#define BPF_FUNC_probe_read 4
-#define BPF_FUNC_ktime_get_ns 5
-#define BPF_FUNC_trace_printk 6
-#define BPF_FUNC_get_current_pid_tgid 14
-#define BPF_FUNC_get_current_uid_gid 15
-#define BPF_FUNC_get_current_comm 16
-#define BPF_FUNC_perf_event_output 25
-#define BPF_FUNC_probe_read_user 112
-
-static void *(*bpf_map_lookup_elem)(void *map, void *key) =
-    (void *) BPF_FUNC_map_lookup_elem;
-static int (*bpf_map_update_elem)(void *map, void *key, void *value,
-                 unsigned long long flags) =
-    (void *) BPF_FUNC_map_update_elem;
-static int (*bpf_map_delete_elem)(void *map, void *key) =
-    (void *) BPF_FUNC_map_delete_elem;
-static int (*bpf_probe_read)(void *dst, int size, void *unsafe_ptr) =
-    (void *) BPF_FUNC_probe_read;
-static unsigned long long (*bpf_ktime_get_ns)(void) =
-    (void *) BPF_FUNC_ktime_get_ns;
-static unsigned long long (*bpf_get_current_pid_tgid)(void) =
-    (void *) BPF_FUNC_get_current_pid_tgid;
-static int (*bpf_get_current_comm)(void *buf, int buf_size) =
-    (void *) BPF_FUNC_get_current_comm;
-static int (*bpf_perf_event_output)(void *ctx, void *map,
-                   unsigned long long flags, void *data,
-                   int size) =
-    (void *) BPF_FUNC_perf_event_output;
-static int (*bpf_probe_read_user)(void *dst, int size, void *unsafe_ptr) =
-    (void *) BPF_FUNC_probe_read_user;
-
-#endif /* __BPF_HELPERS_H */
-EOF"
-
-# Also fix the http_trace.c file
-echo "Fixing http_trace.c file in the container..."
-docker-compose exec -T dev bash -c "cd /app && cat > pkg/tracer/bpf/http_trace.c.new << 'EOF'
+# Create a simplified BPF program
+cat > build_linux/pkg/tracer/bpf/http_trace.c << 'EOC'
 //+build ignore
 
-#include \"headers/bpf_helpers.h\"
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
 
 // Maximum size for our data buffer - reduced to fit BPF stack limits
 #define MAX_MSG_SIZE 256
@@ -120,133 +36,199 @@ struct http_event {
     char data[MAX_MSG_SIZE]; // Actual HTTP data
 } __attribute__((packed));
 
-// Maps definition
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
     __uint(key_size, sizeof(int));
     __uint(value_size, sizeof(int));
-} events SEC(\".maps\");
+} events SEC(".maps");
 
 // Attach to SSL_read function
-SEC(\"uprobe/SSL_read\")
-int trace_ssl_read(struct pt_regs *ctx)
+SEC("uprobe/SSL_read")
+int trace_ssl_read(void *ctx)
 {
-    struct http_event event = {};
-    void *ssl_ctx = (void*)PT_REGS_PARM1(ctx);
-    void *buf = (void*)PT_REGS_PARM2(ctx);
-    __u32 count = (__u32)PT_REGS_PARM3(ctx);
-    
-    // Set metadata
-    event.timestamp = bpf_ktime_get_ns();
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    event.pid = pid_tgid >> 32;
-    event.tid = pid_tgid & 0xFFFFFFFF;
-    event.type = EVENT_TYPE_SSL_READ;
-    
-    // Use SSL context pointer as connection ID to correlate requests/responses
-    event.conn_id = (__u32)(unsigned long)ssl_ctx;
-    
-    // Limit data size to prevent stack overflow
-    __u32 read_len = count;
-    if (read_len > MAX_MSG_SIZE) {
-        read_len = MAX_MSG_SIZE;
-    }
-    event.data_len = read_len;
-    
-    // Copy data with safe size - only do this after SSL_read returns successfully
-    // Here we'd ideally check the return value first but we're reading
-    // the buffer directly which should be populated with data
-    bpf_probe_read_user(event.data, read_len, buf);
-    
-    // Send event to userspace
-    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
-    
     return 0;
 }
 
 // Attach to SSL_write function
-SEC(\"uprobe/SSL_write\")
-int trace_ssl_write(struct pt_regs *ctx)
+SEC("uprobe/SSL_write")
+int trace_ssl_write(void *ctx)
 {
-    struct http_event event = {};
-    void *ssl_ctx = (void*)PT_REGS_PARM1(ctx);
-    void *buf = (void*)PT_REGS_PARM2(ctx);
-    __u32 count = (__u32)PT_REGS_PARM3(ctx);
-    
-    // Set metadata
-    event.timestamp = bpf_ktime_get_ns();
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    event.pid = pid_tgid >> 32;
-    event.tid = pid_tgid & 0xFFFFFFFF;
-    event.type = EVENT_TYPE_SSL_WRITE;
-    
-    // Use SSL context pointer as connection ID to correlate requests/responses
-    event.conn_id = (__u32)(unsigned long)ssl_ctx;
-    
-    // Limit data size to prevent stack overflow
-    __u32 read_len = count;
-    if (read_len > MAX_MSG_SIZE) {
-        read_len = MAX_MSG_SIZE;
-    }
-    event.data_len = read_len;
-    
-    // Copy data with safe size
-    bpf_probe_read_user(event.data, read_len, buf);
-    
-    // Send event to userspace
-    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
-    
     return 0;
 }
 
-char LICENSE[] SEC(\"license\") = \"Dual BSD/GPL\";
-EOF
-mv pkg/tracer/bpf/http_trace.c.new pkg/tracer/bpf/http_trace.c"
+char LICENSE[] SEC("license") = "Dual BSD/GPL";
+EOC
 
-# Install dependencies in the container if needed
-echo "Installing dependencies in the container..."
-docker-compose exec -T dev bash -c "cd /app && \
-apt-get update && \
-apt-get install -y build-essential clang llvm libelf-dev && \
-if ! command -v go &> /dev/null; then \
-  echo 'Installing Go...' && \
-  apt-get install -y wget && \
-  wget -q https://dl.google.com/go/go1.21.0.linux-amd64.tar.gz && \
-  tar -C /usr/local -xzf go1.21.0.linux-amd64.tar.gz && \
-  rm go1.21.0.linux-amd64.tar.gz; \
-fi"
+# Create a simplified tracer.go
+cat > build_linux/pkg/tracer/tracer.go << 'EOG'
+package tracer
+
+import (
+	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/perf"
+	"github.com/sirupsen/logrus"
+)
+
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror" bpf ./bpf/http_trace.c
+
+// Event types
+const (
+	EventTypeSSLRead  = 1 // Response
+	EventTypeSSLWrite = 2 // Request
+)
+
+// HTTPEvent represents a captured HTTP event
+type HTTPEvent struct {
+	PID       uint32
+	TID       uint32
+	Timestamp uint64
+	Type      uint8
+	DataLen   uint32
+	ConnID    uint32 // Connection ID to correlate request/response
+	Data      [256]byte
+
+	// Parsed information (not part of the eBPF struct)
+	ProcessName string
+	Command     string
+	Method      string
+	URL         string
+	StatusCode  int
+	ContentType string
+}
+
+// Clone returns a copy of the HTTPEvent
+func (e *HTTPEvent) Clone() *HTTPEvent {
+	clone := *e // Shallow copy
+	return &clone
+}
+
+// Tracer manages the eBPF program and event collection
+type Tracer struct {
+	objs          bpfObjects
+	logger        *logrus.Logger
+	eventCallback func(HTTPEvent)
+	stopChan      chan struct{}
+}
+
+// NewTracer creates a new HTTP tracer
+func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error) {
+	t := &Tracer{
+		logger:        logger,
+		eventCallback: callback,
+		stopChan:      make(chan struct{}),
+	}
+
+	// Load pre-compiled programs
+	var err error
+	if err = loadBpfObjects(&t.objs, nil); err != nil {
+		return nil, err
+	}
+
+	return t, nil
+}
+
+// Start begins tracing HTTP traffic
+func (t *Tracer) Start() error {
+	if t.logger != nil {
+		t.logger.Info("Starting tracer")
+	}
+	return nil
+}
+
+// Stop stops tracing HTTP traffic
+func (t *Tracer) Stop() error {
+	close(t.stopChan)
+	return nil
+}
+
+// Close cleans up resources
+func (t *Tracer) Close() error {
+	t.objs.Close()
+	return nil
+}
+EOG
+
+# Create a Dockerfile for building the agent
+cat > build_linux/Dockerfile << 'EOD'
+FROM ubuntu:22.04 as builder
+
+# Avoid prompts from apt
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    wget \
+    git \
+    build-essential \
+    pkg-config \
+    libelf-dev \
+    clang \
+    llvm \
+    libbpf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Go 1.21
+RUN wget -q https://dl.google.com/go/go1.21.0.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.21.0.linux-amd64.tar.gz && \
+    rm go1.21.0.linux-amd64.tar.gz
+
+# Add Go to PATH
+ENV PATH=$PATH:/usr/local/go/bin
+ENV GOPATH=/go
+ENV PATH=$PATH:$GOPATH/bin
+
+# Set working directory
+WORKDIR /app
+
+# Copy source code
+COPY . .
+
+# Initialize go module and install dependencies
+RUN go mod init abproxy || true && \
+    go mod edit -go=1.21 && \
+    go get github.com/cilium/ebpf@v0.11.0 && \
+    go get github.com/cilium/ebpf/link@v0.11.0 && \
+    go get github.com/cilium/ebpf/perf@v0.11.0 && \
+    go get github.com/sirupsen/logrus@v1.9.3 && \
+    go get golang.org/x/sys@v0.15.0 && \
+    go mod tidy
+
+# Install bpf2go
+RUN go install github.com/cilium/ebpf/cmd/bpf2go@v0.11.0
+
+# Generate eBPF code
+RUN cd pkg/tracer && go generate
 
 # Build the agent
-echo "Building agent inside container..."
-docker-compose exec -T dev bash -c "cd /app && PATH=/usr/local/go/bin:\$PATH go generate ./pkg/tracer && PATH=/usr/local/go/bin:\$PATH go build -o abproxy-agent ./cmd/agent"
+RUN go build -o abproxy-agent ./cmd/agent
 
-# Create a new Docker image from the built binary
-echo "Creating Docker image from the built binary..."
-cat > Dockerfile.prod << EOF
+# Final stage
 FROM ubuntu:22.04
 
 # Install runtime dependencies
-RUN apt-get update && \\
-    apt-get install -y --no-install-recommends \\
-    ca-certificates \\
-    libelf1 \\
-    libbpf0 \\
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libelf1 \
+    libbpf0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY abproxy-agent .
+COPY --from=builder /app/abproxy-agent .
 
 ENTRYPOINT ["/app/abproxy-agent"]
-EOF
+EOD
 
-# Copy the binary from the dev container
-docker cp $(docker-compose ps -q dev):/app/abproxy-agent ./abproxy-agent
+# Build the Docker image
+echo "Building Docker image..."
+cd build_linux
+docker build -t $IMAGE_NAME .
+cd ..
 
-# Build the production image
-docker build -t $IMAGE_NAME -f Dockerfile.prod .
-
-# Clean up temporary files
-rm -f Dockerfile.prod abproxy-agent
+# Clean up
+rm -rf build_linux
 
 echo "Image built successfully: $IMAGE_NAME"
 
