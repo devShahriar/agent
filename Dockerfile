@@ -8,6 +8,7 @@ RUN apt-get update && \
     llvm \
     libbpf-dev \
     linux-headers-generic \
+    linux-tools-generic \
     wget \
     git \
     pkg-config \
@@ -26,9 +27,10 @@ ENV PATH=$PATH:$GOPATH/bin
 WORKDIR /app
 COPY . .
 
-# Download pre-generated vmlinux.h for a common kernel version
+# Download pre-generated vmlinux.h and set up BPF headers
 RUN mkdir -p pkg/tracer/bpf && \
-    wget -O pkg/tracer/bpf/vmlinux.h https://raw.githubusercontent.com/aquasecurity/tracee/main/pkg/ebpf/c/vmlinux.h
+    wget -O pkg/tracer/bpf/vmlinux.h https://raw.githubusercontent.com/aquasecurity/tracee/main/pkg/ebpf/c/vmlinux.h && \
+    ln -s /usr/include/bpf /usr/include/linux/bpf
 
 # Initialize go module and install dependencies
 RUN go mod init abproxy || true && \

@@ -33,7 +33,7 @@ struct {
 
 // Function to handle SSL events
 static __always_inline
-int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, size_t count, __u8 event_type) {
+int handle_ssl_event(struct bpf_probe_ctx *ctx, void *ssl_ctx, void *buf, size_t count, __u8 event_type) {
     struct http_event event = {};
     
     // Get process info
@@ -59,16 +59,16 @@ int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, size_t count
     return 0;
 }
 
-// SSL_read probe
 SEC("uprobe/SSL_read")
-int BPF_UPROBE(trace_ssl_read, void *ssl, void *buf, int num) {
-    return handle_ssl_event((struct pt_regs *)ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
+int BPF_UPROBE(ssl_read, void *ssl, void *buf, int num) {
+    struct bpf_probe_ctx *ctx = (struct bpf_probe_ctx *)bpf_get_context();
+    return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
 }
 
-// SSL_write probe
 SEC("uprobe/SSL_write")
-int BPF_UPROBE(trace_ssl_write, void *ssl, void *buf, int num) {
-    return handle_ssl_event((struct pt_regs *)ctx, ssl, buf, num, EVENT_TYPE_SSL_WRITE);
+int BPF_UPROBE(ssl_write, void *ssl, void *buf, int num) {
+    struct bpf_probe_ctx *ctx = (struct bpf_probe_ctx *)bpf_get_context();
+    return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_WRITE);
 }
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
