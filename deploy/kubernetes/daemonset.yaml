@@ -28,6 +28,18 @@ spec:
               fi
               mkdir -p /sys/fs/bpf/abproxy
               chmod 700 /sys/fs/bpf/abproxy
+              # Set correct SELinux context if available
+              if command -v chcon > /dev/null 2>&1; then
+                chcon -R -t bpf_t /sys/fs/bpf/ || true
+              fi
+              # Ensure kernel allows unprivileged BPF
+              if [ -f /proc/sys/kernel/unprivileged_bpf_disabled ]; then
+                echo 0 > /proc/sys/kernel/unprivileged_bpf_disabled
+              fi
+              # Set resource limits
+              if [ -f /proc/sys/net/core/bpf_jit_limit ]; then
+                echo 1000000000 > /proc/sys/net/core/bpf_jit_limit
+              fi
               '
           securityContext:
             privileged: true
@@ -36,7 +48,7 @@ spec:
               mountPath: /sys
       containers:
         - name: abproxy-agent
-          image: devshahriar/abproxy-agent:v1.13.0
+          image: devshahriar/abproxy-agent:v1.14.0
           imagePullPolicy: Always
           securityContext:
             privileged: true
@@ -48,6 +60,11 @@ spec:
                 - NET_ADMIN
                 - PERFMON
                 - BPF
+                - IPC_LOCK # Added for memory locking
+            runAsUser: 0 # Run as root
+            allowPrivilegeEscalation: true
+            seLinuxOptions:
+              type: unconfined_t
           volumeMounts:
             - name: sys
               mountPath: /sys
@@ -56,9 +73,16 @@ spec:
               readOnly: true
             - name: debugfs
               mountPath: /sys/kernel/debug
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
           env:
             - name: DEBUG
               value: "true"
+            - name: LIBEBPF_IGNORE_VDSO_ERR
+              value: "1"
+            - name: BPF_FORCE_KERNEL_VERSION
+              value: "0"
       volumes:
         - name: sys
           hostPath:
@@ -69,6 +93,9 @@ spec:
         - name: debugfs
           hostPath:
             path: /sys/kernel/debug
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
 ---
 apiVersion: v1
 kind: ServiceAccount

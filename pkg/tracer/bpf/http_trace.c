@@ -20,7 +20,7 @@
 #define PT_REGS_PARAM2(x) ((x)->rsi)
 #define PT_REGS_PARAM3(x) ((x)->rdx)
 
-// Maximum size for our data buffer
+// Maximum size for our data buffer - must be power of 2
 #define MAX_MSG_SIZE 256
 
 // Event types
@@ -49,9 +49,18 @@ struct {
     __uint(max_entries, 1024);
 } events SEC(".maps");
 
+// Fixed-size read function that the verifier can analyze properly
+static __always_inline int
+safe_read_user(void *dst, const void *src, size_t size)
+{
+    // Fixed-size access that the verifier can analyze
+    const int ret = bpf_probe_read_user(dst, MAX_MSG_SIZE, src);
+    return ret;
+}
+
 // Function to handle SSL events
 static __always_inline
-int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, __u32 count, __u8 event_type) {
+int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, unsigned int count, __u8 event_type) {
     struct http_event event = {};
     
     // Get process info
@@ -61,15 +70,30 @@ int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, __u32 count,
     // Set event metadata
     event.timestamp = bpf_ktime_get_ns();
     event.type = event_type;
-    event.conn_id = (__u32)(unsigned long)ssl_ctx;
     
-    // Copy data with size limit
-    __u32 read_len = count > MAX_MSG_SIZE ? MAX_MSG_SIZE : count;
-    event.data_len = read_len;
+    // Safety check for the connection ID
+    if (ssl_ctx) {
+        event.conn_id = (__u32)(unsigned long)ssl_ctx;
+    } else {
+        event.conn_id = 0;
+    }
     
-    // Try to read the data
-    if (bpf_probe_read_user(event.data, read_len, buf) == 0) {
-        // Send event to userspace
+    // Safety check for buffer and count
+    if (!buf || count == 0) {
+        return 0;
+    }
+    
+    // Clamp to fixed max size
+    if (count > MAX_MSG_SIZE) {
+        count = MAX_MSG_SIZE;
+    }
+    
+    // Store actual data length
+    event.data_len = count;
+    
+    // Use our safe read function with fixed size
+    if (safe_read_user(event.data, buf, MAX_MSG_SIZE) == 0) {
+        // Only send event on successful read
         bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     }
     
@@ -81,7 +105,7 @@ SEC("uprobe")
 int trace_ssl_read(struct pt_regs *ctx) {
     void *ssl = (void *)PT_REGS_PARAM1(ctx);
     void *buf = (void *)PT_REGS_PARAM2(ctx);
-    __u32 num = (__u32)PT_REGS_PARAM3(ctx);
+    unsigned int num = (unsigned int)PT_REGS_PARAM3(ctx); // Explicitly use unsigned
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
 }
@@ -90,7 +114,7 @@ SEC("uprobe")
 int trace_ssl_write(struct pt_regs *ctx) {
     void *ssl = (void *)PT_REGS_PARAM1(ctx);
     void *buf = (void *)PT_REGS_PARAM2(ctx);
-    __u32 num = (__u32)PT_REGS_PARAM3(ctx);
+    unsigned int num = (unsigned int)PT_REGS_PARAM3(ctx); // Explicitly use unsigned
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_WRITE);
 }
