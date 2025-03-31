@@ -1,9 +1,15 @@
 //+build ignore
 
 #include <linux/bpf.h>
+#include <linux/ptrace.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+
+#ifdef asm_inline
+#undef asm_inline
+#define asm_inline asm
+#endif
 
 // Version information to avoid vDSO lookup
 volatile const unsigned long bpf_prog_version __attribute__((section("version"))) = 0;
