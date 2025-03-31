@@ -11,6 +11,11 @@
 #define asm_inline asm
 #endif
 
+// Define our own parameter access macros for x86_64
+#define PT_REGS_PARAM1(x) ((x)->rdi)
+#define PT_REGS_PARAM2(x) ((x)->rsi)
+#define PT_REGS_PARAM3(x) ((x)->rdx)
+
 // Version information to avoid vDSO lookup
 volatile const unsigned long bpf_prog_version __attribute__((section("version"))) = 0;
 
@@ -69,18 +74,18 @@ int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, __u32 count,
 
 SEC("uprobe/SSL_read")
 int trace_ssl_read(struct pt_regs *ctx) {
-    void *ssl = (void *)PT_REGS_PARM1(ctx);
-    void *buf = (void *)PT_REGS_PARM2(ctx);
-    __u32 num = (__u32)PT_REGS_PARM3(ctx);
+    void *ssl = (void *)PT_REGS_PARAM1(ctx);
+    void *buf = (void *)PT_REGS_PARAM2(ctx);
+    __u32 num = (__u32)PT_REGS_PARAM3(ctx);
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
 }
 
 SEC("uprobe/SSL_write")
 int trace_ssl_write(struct pt_regs *ctx) {
-    void *ssl = (void *)PT_REGS_PARM1(ctx);
-    void *buf = (void *)PT_REGS_PARM2(ctx);
-    __u32 num = (__u32)PT_REGS_PARM3(ctx);
+    void *ssl = (void *)PT_REGS_PARAM1(ctx);
+    void *buf = (void *)PT_REGS_PARAM2(ctx);
+    __u32 num = (__u32)PT_REGS_PARAM3(ctx);
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_WRITE);
 }
