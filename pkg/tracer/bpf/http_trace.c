@@ -34,6 +34,9 @@ struct http_event {
     char data[MAX_MSG_SIZE]; // Actual HTTP data
 } __attribute__((packed));
 
+// Add typedef to make it easier for bpf2go to identify
+typedef struct http_event http_event_t;
+
 // Perf event map for sending events to userspace
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
