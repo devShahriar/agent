@@ -22,21 +22,21 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              set -ex
-              mount | grep /sys/fs/bpf || {
-                mkdir -p /sys/fs/bpf
-                mount -t bpf bpf /sys/fs/bpf
-              }
+              nsenter -t 1 -m -- /bin/sh -c '
+              if ! mount | grep "type bpf"; then
+                mount -t bpf bpf /sys/fs/bpf/
+              fi
               mkdir -p /sys/fs/bpf/abproxy
               chmod 700 /sys/fs/bpf/abproxy
+              '
           securityContext:
             privileged: true
           volumeMounts:
-            - name: bpf
-              mountPath: /sys/fs/bpf
+            - name: sys
+              mountPath: /sys
       containers:
         - name: abproxy-agent
-          image: devshahriar/abproxy-agent:v1.3.0
+          image: devshahriar/abproxy-agent:v1.4.0
           imagePullPolicy: Always
           securityContext:
             privileged: true
@@ -56,8 +56,6 @@ spec:
               readOnly: true
             - name: debugfs
               mountPath: /sys/kernel/debug
-            - name: bpf
-              mountPath: /sys/fs/bpf
           env:
             - name: DEBUG
               value: "true"
@@ -71,10 +69,6 @@ spec:
         - name: debugfs
           hostPath:
             path: /sys/kernel/debug
-        - name: bpf
-          hostPath:
-            path: /sys/fs/bpf
-            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: ServiceAccount
