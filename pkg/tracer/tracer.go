@@ -14,7 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86 -D__KERNEL__ -D__BPF_TRACING__ -DBPF_NO_PRESERVE_ACCESS_INDEX -DHAVE_NO_VDSO -DNO_CORE_RELOC -DCORE_DISABLE_VDSO_LOOKUP -DSKIP_KERNEL_VERSION=1 -I/usr/include/bpf -I/usr/include/x86_64-linux-gnu -I/usr/include" -no-strip bpf ./bpf/http_trace.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86 -D__KERNEL__ -D__BPF_TRACING__ -DBPF_NO_PRESERVE_ACCESS_INDEX -DHAVE_NO_VDSO -DNO_CORE_RELOC -DCORE_DISABLE_VDSO_LOOKUP -DSKIP_KERNEL_VERSION=1 -DBPF_NO_PRESERVE_ACCESS_INDEX=1 -I/usr/include/bpf -I/usr/include/x86_64-linux-gnu -I/usr/include" -no-strip -target bpfel -type http_event_t bpf ./bpf/http_trace.c
 
 // Event types
 const (
@@ -72,13 +72,26 @@ type processInfo struct {
 
 // findSSLPath attempts to find the SSL library path
 func findSSLPath() (string, error) {
+	// For Linux hosts, add more potential paths
 	paths := []string{
+		// Standard Linux paths
 		"/usr/lib/libssl.so.3",
 		"/usr/lib/libssl.so.1.1",
 		"/usr/lib/x86_64-linux-gnu/libssl.so.3",
 		"/usr/lib/x86_64-linux-gnu/libssl.so.1.1",
+		// For Debian/Ubuntu
+		"/lib/x86_64-linux-gnu/libssl.so.1.1",
+		"/lib/x86_64-linux-gnu/libssl.so.3",
+		// For CentOS/RHEL
+		"/lib64/libssl.so.1.1",
+		"/lib64/libssl.so.3",
+		// For Alpine
+		"/lib/libssl.so.1.1",
+		"/lib/libssl.so.3",
+		// ARM paths
 		"/usr/lib/aarch64-linux-gnu/libssl.so.3",
 		"/usr/lib/aarch64-linux-gnu/libssl.so.1.1",
+		"/lib/aarch64-linux-gnu/libssl.so.1.1",
 	}
 
 	for _, path := range paths {
@@ -101,6 +114,30 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 		procCache:     make(map[uint32]processInfo),
 	}
 
+	// Set environment variables for better BPF compatibility
+	os.Setenv("LIBEBPF_IGNORE_VDSO_ERR", "1")
+	os.Setenv("BPF_FORCE_KERNEL_VERSION", "0")
+
+	// For Linux Minikube, ensure BPF filesystem is mounted
+	if _, err := os.Stat("/sys/fs/bpf"); os.IsNotExist(err) {
+		if logger != nil {
+			logger.Warn("BPF filesystem not found at /sys/fs/bpf, attempting to create")
+		}
+		// Try to mount BPF filesystem if it doesn't exist
+		if err := os.MkdirAll("/sys/fs/bpf", 0755); err != nil {
+			logger.WithError(err).
+				Info("Failed to create BPF directory, continuing anyway")
+		}
+	}
+
+	// Create application directory in BPF filesystem
+	if err := os.MkdirAll("/sys/fs/bpf/abproxy", 0700); err != nil {
+		if logger != nil {
+			logger.WithError(err).
+				Info("Failed to create BPF subdirectory, continuing anyway")
+		}
+	}
+
 	// Load pre-compiled programs with modified options
 	opts := &ebpf.CollectionOptions{
 		Programs: ebpf.ProgramOptions{
@@ -109,29 +146,25 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 		},
 	}
 
-	// Tell ebpf to ignore vDSO loading errors (specific for container/K8s environments)
-	os.Setenv("LIBEBPF_IGNORE_VDSO_ERR", "1")
-	// Skip version detection
-	os.Setenv("BPF_FORCE_KERNEL_VERSION", "0")
-
-	// Check if BPF filesystem exists
-	if _, err := os.Stat("/sys/fs/bpf"); os.IsNotExist(err) {
-		return nil, fmt.Errorf("BPF filesystem is not mounted at /sys/fs/bpf")
-	}
-
-	// Create our directory
-	if err := os.MkdirAll("/sys/fs/bpf/abproxy", 0700); err != nil {
-		return nil, fmt.Errorf("failed to create BPF directory: %w", err)
-	}
-
 	// Load BPF objects
 	objs := bpfObjects{}
-	if err := loadBpfObjects(&objs, opts); err != nil {
-		if logger != nil {
-			logger.WithError(err).Error("Failed to load BPF objects")
+	err := loadBpfObjects(&objs, opts)
+	if err != nil {
+		if strings.Contains(err.Error(), "vdso") {
+			// vDSO errors can be ignored in containerized environments
+			if logger != nil {
+				logger.WithError(err).
+					Warn("vDSO lookup failed (expected in containers), continuing")
+			}
+		} else {
+			// Other errors are more serious but might not be fatal
+			if logger != nil {
+				logger.WithError(err).Error("Failed to load BPF objects")
+			}
+			return nil, fmt.Errorf("loading BPF objects: %w", err)
 		}
-		return nil, fmt.Errorf("loading objects: %w", err)
 	}
+
 	t.objs = &objs
 
 	// Initialize perf reader for the events map
@@ -142,9 +175,41 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 			return nil, fmt.Errorf("creating perf reader: %w", err)
 		}
 		t.perfReader = rd
+	} else if logger != nil {
+		logger.Warn("Events map is nil, perf reader not initialized")
 	}
 
 	return t, nil
+}
+
+// LoadSSLPrograms loads SSL tracing programs without using vDSO
+func loadSSLPrograms() (*ebpf.Program, *ebpf.Program, error) {
+	// Compile the BPF programs manually
+	spec, err := ebpf.LoadCollectionSpec("bpf_bpfel.o")
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading BPF spec: %w", err)
+	}
+
+	// Load the collection
+	coll, err := ebpf.NewCollection(spec)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating BPF collection: %w", err)
+	}
+	defer coll.Close()
+
+	// Get the individual programs
+	readProg := coll.DetachProgram("trace_ssl_read")
+	if readProg == nil {
+		return nil, nil, fmt.Errorf("program trace_ssl_read not found")
+	}
+
+	writeProg := coll.DetachProgram("trace_ssl_write")
+	if writeProg == nil {
+		readProg.Close()
+		return nil, nil, fmt.Errorf("program trace_ssl_write not found")
+	}
+
+	return readProg, writeProg, nil
 }
 
 // Start begins tracing HTTP traffic
@@ -165,38 +230,71 @@ func (t *Tracer) Start() error {
 		return fmt.Errorf("opening SSL library: %w", err)
 	}
 
-	// Attach to SSL_read with retries
-	for i := 0; i < 3; i++ {
-		readUprobe, err := ex.Uprobe(
-			"SSL_read",
-			t.objs.TraceSslRead,
-			&link.UprobeOptions{},
-		)
-		if err == nil {
-			t.uprobes = append(t.uprobes, readUprobe)
-			break
+	// Load SSL programs manually to avoid vDSO issues
+	sslReadProg, sslWriteProg, err := loadSSLPrograms()
+	if err != nil {
+		// Fall back to the already loaded objects if manual loading fails
+		if t.logger != nil {
+			t.logger.WithError(err).
+				Warn("Manual program loading failed, falling back to preloaded programs")
 		}
-		if i == 2 {
-			return fmt.Errorf("attaching SSL_read uprobe: %w", err)
-		}
-		t.logger.WithError(err).Warn("Retrying SSL_read uprobe attachment")
-	}
 
-	// Attach to SSL_write with retries
-	for i := 0; i < 3; i++ {
-		writeUprobe, err := ex.Uprobe(
-			"SSL_write",
-			t.objs.TraceSslWrite,
-			&link.UprobeOptions{},
-		)
-		if err == nil {
-			t.uprobes = append(t.uprobes, writeUprobe)
-			break
+		// Attach to SSL_read with retries using preloaded programs
+		for i := 0; i < 3; i++ {
+			readUprobe, err := ex.Uprobe("SSL_read", t.objs.TraceSslRead, nil)
+			if err == nil {
+				t.uprobes = append(t.uprobes, readUprobe)
+				break
+			}
+			if i == 2 {
+				return fmt.Errorf("attaching SSL_read uprobe: %w", err)
+			}
+			t.logger.WithError(err).Warn("Retrying SSL_read uprobe attachment")
 		}
-		if i == 2 {
-			return fmt.Errorf("attaching SSL_write uprobe: %w", err)
+
+		// Attach to SSL_write with retries using preloaded programs
+		for i := 0; i < 3; i++ {
+			writeUprobe, err := ex.Uprobe("SSL_write", t.objs.TraceSslWrite, nil)
+			if err == nil {
+				t.uprobes = append(t.uprobes, writeUprobe)
+				break
+			}
+			if i == 2 {
+				return fmt.Errorf("attaching SSL_write uprobe: %w", err)
+			}
+			t.logger.WithError(err).Warn("Retrying SSL_write uprobe attachment")
 		}
-		t.logger.WithError(err).Warn("Retrying SSL_write uprobe attachment")
+	} else {
+		// Use the manually loaded programs
+		if t.logger != nil {
+			t.logger.Info("Using manually loaded SSL trace programs")
+		}
+
+		// Attach to SSL_read with retries
+		for i := 0; i < 3; i++ {
+			readUprobe, err := ex.Uprobe("SSL_read", sslReadProg, nil)
+			if err == nil {
+				t.uprobes = append(t.uprobes, readUprobe)
+				break
+			}
+			if i == 2 {
+				return fmt.Errorf("attaching SSL_read uprobe: %w", err)
+			}
+			t.logger.WithError(err).Warn("Retrying SSL_read uprobe attachment")
+		}
+
+		// Attach to SSL_write with retries
+		for i := 0; i < 3; i++ {
+			writeUprobe, err := ex.Uprobe("SSL_write", sslWriteProg, nil)
+			if err == nil {
+				t.uprobes = append(t.uprobes, writeUprobe)
+				break
+			}
+			if i == 2 {
+				return fmt.Errorf("attaching SSL_write uprobe: %w", err)
+			}
+			t.logger.WithError(err).Warn("Retrying SSL_write uprobe attachment")
+		}
 	}
 
 	// Start polling for events

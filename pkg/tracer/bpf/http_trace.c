@@ -1,6 +1,6 @@
 //+build ignore
 
-// Force disable vDSO
+// Force disable vDSO and version checks
 #define CORE_DISABLE_VDSO_LOOKUP 1
 #define HAVE_NO_VDSO 1
 
@@ -38,7 +38,7 @@ struct http_event {
     char data[MAX_MSG_SIZE]; // Actual HTTP data
 } __attribute__((packed));
 
-// Add typedef to make it easier for bpf2go to identify
+// Add typedef for bpf2go to use
 typedef struct http_event http_event_t;
 
 // Perf event map for sending events to userspace
@@ -76,8 +76,8 @@ int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, __u32 count,
     return 0;
 }
 
-// Use uprobe sections with function names but not full paths
-SEC("uprobe/SSL_read")
+// Simple SEC names for uprobe functions
+SEC("uprobe")
 int trace_ssl_read(struct pt_regs *ctx) {
     void *ssl = (void *)PT_REGS_PARAM1(ctx);
     void *buf = (void *)PT_REGS_PARAM2(ctx);
@@ -86,7 +86,7 @@ int trace_ssl_read(struct pt_regs *ctx) {
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
 }
 
-SEC("uprobe/SSL_write")
+SEC("uprobe")
 int trace_ssl_write(struct pt_regs *ctx) {
     void *ssl = (void *)PT_REGS_PARAM1(ctx);
     void *buf = (void *)PT_REGS_PARAM2(ctx);
@@ -96,6 +96,7 @@ int trace_ssl_write(struct pt_regs *ctx) {
 }
 
 // Explicitly set program version to avoid vDSO lookup
+// This is a special value that tells BPF to skip kernel version detection
 __u32 _version SEC("version") = 0xFFFFFFFE;
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
