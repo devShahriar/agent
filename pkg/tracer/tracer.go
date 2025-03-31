@@ -14,7 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86 -I/usr/include/x86_64-linux-gnu" -target native bpf ./bpf/http_trace.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86 -DBPF_NO_PRESERVE_ACCESS_INDEX" -target bpfel bpf ./bpf/http_trace.c
 
 // Event types
 const (
@@ -118,14 +118,14 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 	}
 
 	// Load BPF objects
-	var err error
-	t.objs, err = loadBpfObjects(opts)
-	if err != nil {
+	objs := bpfObjects{}
+	if err := loadBpfObjects(&objs, opts); err != nil {
 		if logger != nil {
 			logger.WithError(err).Error("Failed to load BPF objects")
 		}
 		return nil, fmt.Errorf("loading objects: %w", err)
 	}
+	t.objs = &objs
 
 	// Initialize perf reader for the events map
 	if t.objs.Events != nil {

@@ -1,61 +1,36 @@
-FROM ubuntu:22.04 as builder
-
-# Avoid prompts from apt
-ENV DEBIAN_FRONTEND=noninteractive
+FROM ubuntu:22.04
 
 # Install dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates \
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    clang \
+    llvm \
+    libbpf-dev \
+    linux-headers-generic \
+    pkg-config \
     wget \
     git \
-    build-essential \
-    pkg-config \
-    libelf-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go 1.21
-RUN wget -q https://dl.google.com/go/go1.21.0.linux-amd64.tar.gz && \
+RUN wget -q https://go.dev/dl/go1.21.0.linux-amd64.tar.gz && \
     tar -C /usr/local -xzf go1.21.0.linux-amd64.tar.gz && \
     rm go1.21.0.linux-amd64.tar.gz
 
-# Add Go to PATH
 ENV PATH=$PATH:/usr/local/go/bin
 ENV GOPATH=/go
 ENV PATH=$PATH:$GOPATH/bin
 
-# Set working directory
 WORKDIR /app
 
-# Copy source code
-COPY . .
+# Set up BPF headers
+RUN ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm && \
+    ln -sf /usr/include/x86_64-linux-gnu/bits /usr/include/bits && \
+    ln -sf /usr/include/x86_64-linux-gnu/sys /usr/include/sys && \
+    ln -sf /usr/include/x86_64-linux-gnu/linux /usr/include/linux
 
-# Initialize go module and install dependencies
-RUN go mod init abproxy || true && \
-    go mod edit -go=1.21 && \
-    go get github.com/cilium/ebpf@v0.11.0 && \
-    go get github.com/cilium/ebpf/link@v0.11.0 && \
-    go get github.com/cilium/ebpf/perf@v0.11.0 && \
-    go get github.com/sirupsen/logrus@v1.9.3 && \
-    go get golang.org/x/sys@v0.15.0 && \
-    go mod tidy
+# Install bpf2go tool
+RUN go install github.com/cilium/ebpf/cmd/bpf2go@latest
 
-# Build the agent without trying to generate eBPF code
-# This allows development on MacOS where eBPF code generation isn't supported
-RUN cd cmd/agent && go build -o ../../abproxy-agent
-
-# Final stage
-FROM ubuntu:22.04
-
-# Install runtime dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates \
-    libelf1 \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY --from=builder /app/abproxy-agent .
-
-# Keep container running for development
-CMD ["tail", "-f", "/dev/null"] 
+# This container is meant for development
+CMD ["/bin/bash"] 

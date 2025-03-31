@@ -6,6 +6,9 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 
+// Add version information to avoid vDSO lookup
+volatile const unsigned long bpf_prog_version __attribute__((section(".rodata"))) = 0;
+
 // Maximum size for our data buffer
 #define MAX_MSG_SIZE 256
 
