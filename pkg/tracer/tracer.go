@@ -14,7 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86 -DBPF_NO_PRESERVE_ACCESS_INDEX -I/usr/include/x86_64-linux-gnu" -target bpfel bpf ./bpf/http_trace.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86 -DBPF_NO_PRESERVE_ACCESS_INDEX -I/usr/include/x86_64-linux-gnu -I/usr/include" -target bpfel bpf ./bpf/http_trace.c
 
 // Event types
 const (
@@ -109,12 +109,15 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 		},
 	}
 
-	// Create BPF filesystem mount if it doesn't exist
-	if err := os.MkdirAll("/sys/fs/bpf", 0755); err != nil {
-		logger.WithError(err).Warn("Failed to create BPF filesystem root")
+	// Check if BPF filesystem is mounted
+	if _, err := os.Stat("/sys/fs/bpf"); os.IsNotExist(err) {
+		return nil, fmt.Errorf("BPF filesystem is not mounted at /sys/fs/bpf")
 	}
+
+	// Ensure our directory exists
 	if err := os.MkdirAll("/sys/fs/bpf/abproxy", 0755); err != nil {
-		logger.WithError(err).Warn("Failed to create BPF filesystem directory")
+		logger.WithError(err).Error("Failed to create BPF filesystem directory")
+		return nil, fmt.Errorf("creating BPF directory: %w", err)
 	}
 
 	// Load BPF objects

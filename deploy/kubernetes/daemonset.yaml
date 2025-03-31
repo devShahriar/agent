@@ -16,9 +16,23 @@ spec:
     spec:
       hostPID: true
       hostNetwork: true
+      initContainers:
+        - name: bpf-mount
+          image: alpine:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              mkdir -p /sys/fs/bpf && \
+              mount -t bpf bpf /sys/fs/bpf && \
+              mkdir -p /sys/fs/bpf/abproxy
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: sys
+              mountPath: /sys
       containers:
         - name: abproxy-agent
-          image: devshahriar/abproxy-agent:latest
+          image: devshahriar/abproxy-agent:v1.0.2
           imagePullPolicy: Always
           securityContext:
             privileged: true
