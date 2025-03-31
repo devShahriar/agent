@@ -1,0 +1,6 @@
+kubectl logs -f abproxy-agent-sr7tz  -n monitoring
+Defaulted container "abproxy-agent" out of: abproxy-agent, bpf-mount (init)
+{"level":"info","msg":"Starting HTTP traffic tracer...","time":"2025-03-31T13:43:38Z"}
+{"error":"field TraceSslRead: program trace_ssl_read: load program: permission denied: 81: (85) call bpf_probe_read_user#112: R2 min value is negative, either use unsigned or 'var \u0026= const' (103 line(s) omitted)","level":"error","msg":"Failed to load BPF objects","time":"2025-03-31T13:43:38Z"}
+{"error":"loading objects: field TraceSslRead: program trace_ssl_read: load program: permission denied: 81: (85) call bpf_probe_read_user#112: R2 min value is negative, either use unsigned or 'var \u0026= const' (103 line(s) omitted)","level":"fatal","msg":"Failed to create tracer","time":"2025-03-31T13:43:38Z"}
+
