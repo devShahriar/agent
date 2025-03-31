@@ -1,7 +1,6 @@
 //+build ignore
 
 #include <linux/bpf.h>
-#include <linux/ptrace.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
@@ -41,9 +40,8 @@ int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, __u32 count,
     struct http_event event = {};
     
     // Get process info
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    event.pid = pid_tgid >> 32;
-    event.tid = pid_tgid & 0xFFFFFFFF;
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
     
     // Set event metadata
     event.timestamp = bpf_ktime_get_ns();
