@@ -16,9 +16,6 @@
 #define PT_REGS_PARAM2(x) ((x)->rsi)
 #define PT_REGS_PARAM3(x) ((x)->rdx)
 
-// Version information to avoid vDSO lookup
-volatile const unsigned long bpf_prog_version __attribute__((section("version"))) = 0;
-
 // Maximum size for our data buffer
 #define MAX_MSG_SIZE 256
 
@@ -72,7 +69,8 @@ int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, __u32 count,
     return 0;
 }
 
-SEC("uprobe/SSL_read")
+// Disable CO-RE relocations for these functions
+SEC("uprobe//sys/lib/libssl.so.3:SSL_read")
 int trace_ssl_read(struct pt_regs *ctx) {
     void *ssl = (void *)PT_REGS_PARAM1(ctx);
     void *buf = (void *)PT_REGS_PARAM2(ctx);
@@ -81,7 +79,7 @@ int trace_ssl_read(struct pt_regs *ctx) {
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
 }
 
-SEC("uprobe/SSL_write")
+SEC("uprobe//sys/lib/libssl.so.3:SSL_write")
 int trace_ssl_write(struct pt_regs *ctx) {
     void *ssl = (void *)PT_REGS_PARAM1(ctx);
     void *buf = (void *)PT_REGS_PARAM2(ctx);
@@ -89,5 +87,8 @@ int trace_ssl_write(struct pt_regs *ctx) {
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_WRITE);
 }
+
+// Explicitly set program version to avoid vDSO lookup
+__u32 _version SEC("version") = 0xFFFFFFFE;
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
