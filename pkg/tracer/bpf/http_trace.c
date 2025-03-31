@@ -63,18 +63,18 @@ int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, __u32 count,
 
 SEC("uprobe/SSL_read")
 int trace_ssl_read(struct pt_regs *ctx) {
-    void *ssl = (void *)PT_REGS_PARM1_CORE(ctx);
-    void *buf = (void *)PT_REGS_PARM2_CORE(ctx);
-    __u32 num = (__u32)PT_REGS_PARM3_CORE(ctx);
+    void *ssl = (void *)PT_REGS_PARM1(ctx);
+    void *buf = (void *)PT_REGS_PARM2(ctx);
+    __u32 num = (__u32)PT_REGS_PARM3(ctx);
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
 }
 
 SEC("uprobe/SSL_write")
 int trace_ssl_write(struct pt_regs *ctx) {
-    void *ssl = (void *)PT_REGS_PARM1_CORE(ctx);
-    void *buf = (void *)PT_REGS_PARM2_CORE(ctx);
-    __u32 num = (__u32)PT_REGS_PARM3_CORE(ctx);
+    void *ssl = (void *)PT_REGS_PARM1(ctx);
+    void *buf = (void *)PT_REGS_PARM2(ctx);
+    __u32 num = (__u32)PT_REGS_PARM3(ctx);
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_WRITE);
 }
