@@ -14,7 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86 -D__KERNEL__ -D__BPF_TRACING__ -DBPF_NO_PRESERVE_ACCESS_INDEX -DHAVE_NO_VDSO -DNO_CORE_RELOC -DCORE_DISABLE_VDSO_LOOKUP -I/usr/include/bpf -I/usr/include/x86_64-linux-gnu -I/usr/include" -no-strip bpf ./bpf/http_trace.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86 -D__KERNEL__ -D__BPF_TRACING__ -DBPF_NO_PRESERVE_ACCESS_INDEX -DHAVE_NO_VDSO -DNO_CORE_RELOC -DCORE_DISABLE_VDSO_LOOKUP -DSKIP_KERNEL_VERSION=1 -I/usr/include/bpf -I/usr/include/x86_64-linux-gnu -I/usr/include" -no-strip bpf ./bpf/http_trace.c
 
 // Event types
 const (
@@ -111,6 +111,8 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 
 	// Tell ebpf to ignore vDSO loading errors (specific for container/K8s environments)
 	os.Setenv("LIBEBPF_IGNORE_VDSO_ERR", "1")
+	// Skip version detection
+	os.Setenv("BPF_FORCE_KERNEL_VERSION", "0")
 
 	// Check if BPF filesystem exists
 	if _, err := os.Stat("/sys/fs/bpf"); os.IsNotExist(err) {
