@@ -21,7 +21,7 @@
 #define MAX_MSG_SIZE 256
 
 // Export the typedef as a global declaration so bpf2go can find it
-typedef struct http_event_t {
+struct http_event_t {
     __u32 pid;          // Process ID
     __u32 tid;          // Thread ID
     __u64 timestamp;    // Event timestamp
@@ -29,7 +29,9 @@ typedef struct http_event_t {
     __u32 data_len;     // Length of the actual data
     __u32 conn_id;      // Connection ID to correlate request/response
     char data[MAX_MSG_SIZE]; // Actual HTTP data
-} http_event_t __attribute__((packed));
+} __attribute__((packed));
+
+typedef struct http_event_t http_event_t;
 
 // Define our own parameter access macros for x86_64
 #define PT_REGS_PARAM1(x) ((x)->rdi)
