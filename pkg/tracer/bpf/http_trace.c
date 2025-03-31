@@ -76,8 +76,8 @@ int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, __u32 count,
     return 0;
 }
 
-// Use generic uprobe sections instead of CO-RE relocations
-SEC("uprobe")
+// Use uprobe sections with function names but not full paths
+SEC("uprobe/SSL_read")
 int trace_ssl_read(struct pt_regs *ctx) {
     void *ssl = (void *)PT_REGS_PARAM1(ctx);
     void *buf = (void *)PT_REGS_PARAM2(ctx);
@@ -86,7 +86,7 @@ int trace_ssl_read(struct pt_regs *ctx) {
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
 }
 
-SEC("uprobe")
+SEC("uprobe/SSL_write")
 int trace_ssl_write(struct pt_regs *ctx) {
     void *ssl = (void *)PT_REGS_PARAM1(ctx);
     void *buf = (void *)PT_REGS_PARAM2(ctx);
