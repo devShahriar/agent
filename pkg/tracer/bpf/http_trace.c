@@ -9,6 +9,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+#include <stddef.h>  // For size_t
 
 #ifdef asm_inline
 #undef asm_inline
@@ -49,51 +50,31 @@ struct {
     __uint(max_entries, 1024);
 } events SEC(".maps");
 
-// Fixed-size read function that the verifier can analyze properly
-static __always_inline int
-safe_read_user(void *dst, const void *src, size_t size)
-{
-    // Fixed-size access that the verifier can analyze
-    const int ret = bpf_probe_read_user(dst, MAX_MSG_SIZE, src);
-    return ret;
-}
-
-// Function to handle SSL events
+// Function to handle SSL events - simplified version
 static __always_inline
 int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, unsigned int count, __u8 event_type) {
-    struct http_event event = {};
-    
-    // Get process info
-    event.pid = bpf_get_current_pid_tgid() >> 32;
-    event.tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
-    
-    // Set event metadata
-    event.timestamp = bpf_ktime_get_ns();
-    event.type = event_type;
-    
-    // Safety check for the connection ID
-    if (ssl_ctx) {
-        event.conn_id = (__u32)(unsigned long)ssl_ctx;
-    } else {
-        event.conn_id = 0;
-    }
-    
-    // Safety check for buffer and count
-    if (!buf || count == 0) {
+    // Quick bounds check
+    if (!buf || count == 0 || count > MAX_MSG_SIZE) {
         return 0;
     }
+
+    // Create event with minimal data
+    struct http_event event = {
+        .pid = bpf_get_current_pid_tgid() >> 32,
+        .tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF,
+        .timestamp = bpf_ktime_get_ns(),
+        .type = event_type,
+        .data_len = count
+    };
     
-    // Clamp to fixed max size
-    if (count > MAX_MSG_SIZE) {
-        count = MAX_MSG_SIZE;
+    // Set connection ID if available
+    if (ssl_ctx) {
+        event.conn_id = (__u32)(unsigned long)ssl_ctx;
     }
     
-    // Store actual data length
-    event.data_len = count;
-    
-    // Use our safe read function with fixed size
-    if (safe_read_user(event.data, buf, MAX_MSG_SIZE) == 0) {
-        // Only send event on successful read
+    // Read data into event with fixed size to prevent verifier issues
+    if (bpf_probe_read_user(&event.data[0], MAX_MSG_SIZE, buf) == 0) {
+        // Send event to userspace
         bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     }
     
@@ -105,7 +86,7 @@ SEC("uprobe")
 int trace_ssl_read(struct pt_regs *ctx) {
     void *ssl = (void *)PT_REGS_PARAM1(ctx);
     void *buf = (void *)PT_REGS_PARAM2(ctx);
-    unsigned int num = (unsigned int)PT_REGS_PARAM3(ctx); // Explicitly use unsigned
+    unsigned int num = (unsigned int)PT_REGS_PARAM3(ctx);
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
 }
@@ -114,13 +95,12 @@ SEC("uprobe")
 int trace_ssl_write(struct pt_regs *ctx) {
     void *ssl = (void *)PT_REGS_PARAM1(ctx);
     void *buf = (void *)PT_REGS_PARAM2(ctx);
-    unsigned int num = (unsigned int)PT_REGS_PARAM3(ctx); // Explicitly use unsigned
+    unsigned int num = (unsigned int)PT_REGS_PARAM3(ctx);
     
     return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_WRITE);
 }
 
 // Explicitly set program version to avoid vDSO lookup
-// This is a special value that tells BPF to skip kernel version detection
 __u32 _version SEC("version") = 0xFFFFFFFE;
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
