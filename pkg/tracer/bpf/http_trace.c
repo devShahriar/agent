@@ -1,5 +1,9 @@
 //+build ignore
 
+// Force disable vDSO
+#define CORE_DISABLE_VDSO_LOOKUP 1
+#define HAVE_NO_VDSO 1
+
 #include <linux/bpf.h>
 #include <linux/ptrace.h>
 #include <bpf/bpf_helpers.h>
