@@ -109,15 +109,13 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 		},
 	}
 
-	// Check if BPF filesystem is mounted
+	// Check if BPF filesystem and required directories exist
 	if _, err := os.Stat("/sys/fs/bpf"); os.IsNotExist(err) {
 		return nil, fmt.Errorf("BPF filesystem is not mounted at /sys/fs/bpf")
 	}
 
-	// Ensure our directory exists
-	if err := os.MkdirAll("/sys/fs/bpf/abproxy", 0755); err != nil {
-		logger.WithError(err).Error("Failed to create BPF filesystem directory")
-		return nil, fmt.Errorf("creating BPF directory: %w", err)
+	if _, err := os.Stat("/sys/fs/bpf/abproxy"); os.IsNotExist(err) {
+		return nil, fmt.Errorf("BPF directory /sys/fs/bpf/abproxy does not exist")
 	}
 
 	// Load BPF objects
