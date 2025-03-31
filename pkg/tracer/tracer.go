@@ -14,7 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86 -DBPF_NO_PRESERVE_ACCESS_INDEX" -target bpfel bpf ./bpf/http_trace.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86 -DBPF_NO_PRESERVE_ACCESS_INDEX -I/usr/include/x86_64-linux-gnu" -target bpfel bpf ./bpf/http_trace.c
 
 // Event types
 const (
