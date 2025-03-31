@@ -4,6 +4,17 @@
 #define CORE_DISABLE_VDSO_LOOKUP 1
 #define HAVE_NO_VDSO 1
 
+// Export the typedef as a global declaration so bpf2go can find it
+typedef struct http_event_t {
+    __u32 pid;          // Process ID
+    __u32 tid;          // Thread ID
+    __u64 timestamp;    // Event timestamp
+    __u8 type;          // Event type (read/write)
+    __u32 data_len;     // Length of the actual data
+    __u32 conn_id;      // Connection ID to correlate request/response
+    char data[256]; // Actual HTTP data
+} http_event_t __attribute__((packed));
+
 #include <linux/bpf.h>
 #include <linux/ptrace.h>
 #include <bpf/bpf_helpers.h>
@@ -28,20 +39,6 @@
 #define EVENT_TYPE_SSL_READ  1
 #define EVENT_TYPE_SSL_WRITE 2
 
-// Event structure
-struct http_event {
-    __u32 pid;          // Process ID
-    __u32 tid;          // Thread ID
-    __u64 timestamp;    // Event timestamp
-    __u8 type;          // Event type (read/write)
-    __u32 data_len;     // Length of the actual data
-    __u32 conn_id;      // Connection ID to correlate request/response
-    char data[MAX_MSG_SIZE]; // Actual HTTP data
-} __attribute__((packed));
-
-// Add typedef for bpf2go to use
-typedef struct http_event http_event_t;
-
 // Perf event map for sending events to userspace
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
@@ -59,7 +56,7 @@ int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, unsigned int
     }
 
     // Create event with minimal data
-    struct http_event event = {
+    http_event_t event = {
         .pid = bpf_get_current_pid_tgid() >> 32,
         .tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF,
         .timestamp = bpf_ktime_get_ns(),
