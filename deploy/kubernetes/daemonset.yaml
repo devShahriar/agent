@@ -36,7 +36,7 @@ spec:
               mountPath: /sys
       containers:
         - name: abproxy-agent
-          image: devshahriar/abproxy-agent:v1.4.0
+          image: devshahriar/abproxy-agent:v1.6.0
           imagePullPolicy: Always
           securityContext:
             privileged: true
