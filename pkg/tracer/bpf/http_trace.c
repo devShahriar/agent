@@ -4,19 +4,9 @@
 #define CORE_DISABLE_VDSO_LOOKUP 1
 #define HAVE_NO_VDSO 1
 
-// Export the typedef as a global declaration so bpf2go can find it
-typedef struct http_event_t {
-    __u32 pid;          // Process ID
-    __u32 tid;          // Thread ID
-    __u64 timestamp;    // Event timestamp
-    __u8 type;          // Event type (read/write)
-    __u32 data_len;     // Length of the actual data
-    __u32 conn_id;      // Connection ID to correlate request/response
-    char data[256]; // Actual HTTP data
-} http_event_t __attribute__((packed));
-
 #include <linux/bpf.h>
 #include <linux/ptrace.h>
+#include <linux/types.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
@@ -27,13 +17,24 @@ typedef struct http_event_t {
 #define asm_inline asm
 #endif
 
+// Maximum size for our data buffer - must be power of 2
+#define MAX_MSG_SIZE 256
+
+// Export the typedef as a global declaration so bpf2go can find it
+typedef struct http_event_t {
+    __u32 pid;          // Process ID
+    __u32 tid;          // Thread ID
+    __u64 timestamp;    // Event timestamp
+    __u8 type;          // Event type (read/write)
+    __u32 data_len;     // Length of the actual data
+    __u32 conn_id;      // Connection ID to correlate request/response
+    char data[MAX_MSG_SIZE]; // Actual HTTP data
+} http_event_t __attribute__((packed));
+
 // Define our own parameter access macros for x86_64
 #define PT_REGS_PARAM1(x) ((x)->rdi)
 #define PT_REGS_PARAM2(x) ((x)->rsi)
 #define PT_REGS_PARAM3(x) ((x)->rdx)
-
-// Maximum size for our data buffer - must be power of 2
-#define MAX_MSG_SIZE 256
 
 // Event types
 #define EVENT_TYPE_SSL_READ  1
