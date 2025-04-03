@@ -184,8 +184,8 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 
 // LoadSSLPrograms loads SSL tracing programs without using vDSO
 func loadSSLPrograms() (*ebpf.Program, *ebpf.Program, error) {
-	// Compile the BPF programs manually
-	spec, err := ebpf.LoadCollectionSpec("bpf_bpfel.o")
+	// Try to load from the current directory first
+	spec, err := ebpf.LoadCollectionSpec("/app/pkg/tracer/bpf_bpfel.o")
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading BPF spec: %w", err)
 	}

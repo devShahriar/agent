@@ -38,7 +38,7 @@ type Options struct {
 // DefaultOptions returns default options for Elasticsearch storage
 func DefaultOptions() Options {
 	return Options{
-		URL:           "http://localhost:9200",
+		URL:           "http://elasticsearch-service:9200",
 		IndexPrefix:   "abproxy",
 		SaveEvents:    false,
 		BatchSize:     1000,

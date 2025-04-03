@@ -17,5 +17,8 @@ RUN apk add --no-cache libssl3
 
 WORKDIR /app
 COPY --from=builder /app/abproxy-agent .
+COPY --from=builder /app/pkg/tracer/bpf_*.go /app/pkg/tracer/
+COPY --from=builder /app/pkg/tracer/bpf_*.o /app/pkg/tracer/
+COPY --from=builder /app/pkg/tracer/bpf/ /app/pkg/tracer/bpf/
 
 CMD ["./abproxy-agent"] 
