@@ -98,7 +98,10 @@ static __always_inline int safe_read_user(void *dst, unsigned int size, const vo
 
 // Helper function to check if data looks like HTTP
 static __always_inline int is_http_data(const char *data, size_t len) {
-    if (len < 3) return 0;
+    if (len < 3) {
+        bpf_printk("is_http_data: data too short");
+        return 0;
+    }
     
     // Check for HTTP methods
     if ((data[0] == 'G' && data[1] == 'E' && data[2] == 'T') ||
@@ -106,16 +109,17 @@ static __always_inline int is_http_data(const char *data, size_t len) {
         (data[0] == 'P' && data[1] == 'U' && data[2] == 'T') ||
         (data[0] == 'H' && data[1] == 'E' && data[2] == 'A') ||
         (data[0] == 'D' && data[1] == 'E' && data[2] == 'L')) {
-        bpf_printk("HTTP method detected: %c%c%c", data[0], data[1], data[2]);
+        bpf_printk("is_http_data: HTTP method detected: %c%c%c", data[0], data[1], data[2]);
         return 1;
     }
     
     // Check for HTTP response
     if (len >= 4 && data[0] == 'H' && data[1] == 'T' && data[2] == 'T' && data[3] == 'P') {
-        bpf_printk("HTTP response detected");
+        bpf_printk("is_http_data: HTTP response detected");
         return 1;
     }
     
+    bpf_printk("is_http_data: not HTTP data");
     return 0;
 }
 
@@ -225,6 +229,7 @@ int trace_tcp_recv(struct pt_regs *ctx) {
     if (!state) {
         __u32 new_state = 1;
         bpf_map_update_elem(&conn_state, &event.conn_id, &new_state, BPF_ANY);
+        bpf_printk("TCP recv: new connection state created");
     }
 
     // Copy data if buffer is valid
@@ -242,6 +247,8 @@ int trace_tcp_recv(struct pt_regs *ctx) {
             if (is_http_data(event.data, event.data_len)) {
                 bpf_printk("TCP recv: HTTP traffic detected, sending event");
                 bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            } else {
+                bpf_printk("TCP recv: not HTTP traffic");
             }
         }
     } else {
@@ -277,6 +284,7 @@ int trace_tcp_send(struct pt_regs *ctx) {
     if (!state) {
         __u32 new_state = 1;
         bpf_map_update_elem(&conn_state, &event.conn_id, &new_state, BPF_ANY);
+        bpf_printk("TCP send: new connection state created");
     }
 
     // Copy data if buffer is valid
@@ -294,6 +302,8 @@ int trace_tcp_send(struct pt_regs *ctx) {
             if (is_http_data(event.data, event.data_len)) {
                 bpf_printk("TCP send: HTTP traffic detected, sending event");
                 bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            } else {
+                bpf_printk("TCP send: not HTTP traffic");
             }
         }
     } else {

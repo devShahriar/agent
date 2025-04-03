@@ -280,51 +280,36 @@ func (t *Tracer) Start() error {
 			}
 		} else {
 			// Load SSL programs manually to avoid vDSO issues
-			_, _, err := loadSSLPrograms()
+			readProg, writeProg, err := loadSSLPrograms()
 			if err != nil {
 				if t.logger != nil {
 					t.logger.WithError(err).
 						Warn("Manual program loading failed, falling back to preloaded programs")
 				}
-
-				// Fall back to the already loaded objects if manual loading fails
-				if t.objs == nil {
+			} else {
+				// Attach to SSL_read
+				readUprobe, err := ex.Uprobe("SSL_read", readProg, nil)
+				if err != nil {
 					if t.logger != nil {
-						t.logger.Error("No BPF objects available for SSL tracing")
+						t.logger.WithError(err).Error("Failed to attach SSL_read uprobe")
 					}
 				} else {
-					// Attach to SSL_read with retries using preloaded programs
-					for i := 0; i < 3; i++ {
-						readUprobe, err := ex.Uprobe("SSL_read", t.objs.TraceSslRead, nil)
-						if err == nil {
-							t.uprobes = append(t.uprobes, readUprobe)
-							if t.logger != nil {
-								t.logger.Info("Successfully attached SSL_read uprobe")
-							}
-							break
-						}
-						if i == 2 {
-							if t.logger != nil {
-								t.logger.WithError(err).Error("Failed to attach SSL_read uprobe")
-							}
-						}
+					t.uprobes = append(t.uprobes, readUprobe)
+					if t.logger != nil {
+						t.logger.Info("Successfully attached SSL_read uprobe")
 					}
+				}
 
-					// Attach to SSL_write with retries using preloaded programs
-					for i := 0; i < 3; i++ {
-						writeUprobe, err := ex.Uprobe("SSL_write", t.objs.TraceSslWrite, nil)
-						if err == nil {
-							t.uprobes = append(t.uprobes, writeUprobe)
-							if t.logger != nil {
-								t.logger.Info("Successfully attached SSL_write uprobe")
-							}
-							break
-						}
-						if i == 2 {
-							if t.logger != nil {
-								t.logger.WithError(err).Error("Failed to attach SSL_write uprobe")
-							}
-						}
+				// Attach to SSL_write
+				writeUprobe, err := ex.Uprobe("SSL_write", writeProg, nil)
+				if err != nil {
+					if t.logger != nil {
+						t.logger.WithError(err).Error("Failed to attach SSL_write uprobe")
+					}
+				} else {
+					t.uprobes = append(t.uprobes, writeUprobe)
+					if t.logger != nil {
+						t.logger.Info("Successfully attached SSL_write uprobe")
 					}
 				}
 			}
