@@ -284,9 +284,9 @@ int trace_tcp_send(struct pt_regs *ctx) {
 // Trace TCP connect
 SEC("kprobe/tcp_v4_connect")
 int trace_tcp_connect(struct pt_regs *ctx) {
+    http_event_t event = {};
     struct sock *sk = (struct sock *)ctx->rdi;
     struct sockaddr_in *addr = (struct sockaddr_in *)ctx->rsi;
-    http_event_t event = {};
 
     // Get process and thread IDs
     event.pid = bpf_get_current_pid_tgid() >> 32;

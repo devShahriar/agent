@@ -471,6 +471,38 @@ func (t *Tracer) Start() error {
 		}
 	}
 
+	// Attach TCP kprobes
+	if t.objs != nil {
+		// Attach tcp_recvmsg kprobe
+		kp, err := link.Kprobe("tcp_recvmsg", t.objs.TraceTcpRecv, nil)
+		if err != nil {
+			t.logger.WithError(err).Error("Failed to attach tcp_recvmsg kprobe")
+		} else {
+			t.uprobes = append(t.uprobes, kp)
+			t.logger.Info("Successfully attached tcp_recvmsg kprobe")
+		}
+
+		// Attach tcp_sendmsg kprobe
+		kp, err = link.Kprobe("tcp_sendmsg", t.objs.TraceTcpSend, nil)
+		if err != nil {
+			t.logger.WithError(err).Error("Failed to attach tcp_sendmsg kprobe")
+		} else {
+			t.uprobes = append(t.uprobes, kp)
+			t.logger.Info("Successfully attached tcp_sendmsg kprobe")
+		}
+
+		// Attach tcp_v4_connect kprobe
+		kp, err = link.Kprobe("tcp_v4_connect", t.objs.TraceTcpConnect, nil)
+		if err != nil {
+			t.logger.WithError(err).Error("Failed to attach tcp_v4_connect kprobe")
+		} else {
+			t.uprobes = append(t.uprobes, kp)
+			t.logger.Info("Successfully attached tcp_v4_connect kprobe")
+		}
+	} else {
+		t.logger.Error("BPF objects not loaded, cannot attach kprobes")
+	}
+
 	// Start polling for events
 	go t.pollEvents()
 
