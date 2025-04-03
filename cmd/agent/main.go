@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"os"
@@ -11,9 +10,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"abproxy/pkg/storage"
-	"abproxy/pkg/storage/elasticsearch"
-	"abproxy/pkg/storage/file"
 	"abproxy/pkg/tracer"
 )
 
@@ -60,115 +56,71 @@ func main() {
 	// Parse flags
 	flag.Parse()
 
-	// Set log level
-	level, err := logrus.ParseLevel(*logLevel)
-	if err != nil {
-		log.WithError(err).Fatal("Invalid log level")
-	}
-	log.SetLevel(level)
-
-	log.Info("Starting HTTP traffic tracer...")
-
-	// Create context that will be canceled on shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Set up logging
+	log := logrus.New()
+	log.SetFormatter(&logrus.JSONFormatter{})
+	log.SetLevel(logrus.DebugLevel)
 
 	// Create storage
-	var store storage.Storage
-	switch *storageType {
-	case "file":
-		fileOpts := file.Options{
-			Directory:   *fileDir,
-			Prefix:      *filePrefix,
-			SaveEvents:  *saveEvents,
-			RawFormat:   *fileRawFormat,
-			MaxFileSize: 100 * 1024 * 1024, // 100MB
-			FileMode:    0644,
-		}
-		store, err = file.New(fileOpts)
+	var storage tracer.Storage
+	var err error
+	if *storageType == "file" {
+		storage, err = tracer.NewFileStorage(*fileDir)
 		if err != nil {
 			log.WithError(err).Fatal("Failed to create file storage")
 		}
-	case "elasticsearch":
-		log.WithFields(logrus.Fields{
-			"url":         *esURL,
-			"indexPrefix": *esPrefix,
-		}).Info("Connecting to Elasticsearch...")
-
-		esOpts := elasticsearch.Options{
-			URL:         *esURL,
-			BasicAuth:   *esAuth,
-			IndexPrefix: *esPrefix,
-			SaveEvents:  *saveEvents,
-			BatchSize:   1000,
-		}
-		store, err = elasticsearch.New(esOpts)
+	} else if *storageType == "elasticsearch" {
+		storage, err = tracer.NewElasticsearchStorage(*esURL, *esPrefix)
 		if err != nil {
 			log.WithError(err).Fatal("Failed to create Elasticsearch storage")
 		}
-		log.Info("Successfully connected to Elasticsearch")
-	default:
-		log.Fatalf("Unknown storage type: %s", *storageType)
+	} else {
+		log.Fatal("Invalid storage type")
 	}
-	defer store.Close()
-
-	// Create storage manager
-	storageManager := storage.NewManager(store, nil)
-	defer storageManager.Close()
+	defer storage.Close()
 
 	// Create tracer
-	t, err := tracer.NewTracer(log, func(event tracer.HTTPEvent) {
-		// Log summary of the event
-		logEvent(&event)
-
-		// Save the event to storage
-		if err := storageManager.ProcessEvent(ctx, &event); err != nil {
-			log.WithFields(logrus.Fields{
-				"error": err,
-				"pid":   event.PID,
-				"type":  event.Type,
-			}).Error("Failed to process event")
-		} else {
-			log.WithFields(logrus.Fields{
-				"pid":  event.PID,
-				"type": event.Type,
-			}).Debug("Successfully processed event")
-		}
-	})
+	t, err := tracer.NewTracer(log, storage, nil)
 	if err != nil {
 		log.WithError(err).Fatal("Failed to create tracer")
 	}
-	defer t.Close()
+
+	// Set up event callback
+	t.SetEventCallback(func(event tracer.HTTPEvent) {
+		// Log event summary
+		log.WithFields(logrus.Fields{
+			"type":         event.Type,
+			"pid":          event.PID,
+			"tid":          event.TID,
+			"process_name": event.ProcessName,
+			"command":      event.Command,
+			"method":       event.Method,
+			"url":          event.URL,
+			"status_code":  event.StatusCode,
+			"content_type": event.ContentType,
+			"data_len":     event.DataLen,
+			"data":         string(event.Data[:event.DataLen]),
+		}).Info("HTTP event received")
+
+		// Store event
+		if err := storage.Store(event); err != nil {
+			log.WithError(err).Error("Failed to store event")
+		}
+	})
 
 	// Start tracer
 	if err := t.Start(); err != nil {
 		log.WithError(err).Fatal("Failed to start tracer")
 	}
 
-	log.Info("Tracer is running. Press Ctrl+C to stop.")
+	// Wait for interrupt
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
 
-	// Start a cleanup routine for old connections
-	cleanupTicker := time.NewTicker(30 * time.Second)
-	defer cleanupTicker.Stop()
-
-	go func() {
-		for {
-			select {
-			case <-cleanupTicker.C:
-				storageManager.CleanupOldConnections(5 * time.Minute)
-				log.Debug("Cleaned up old connections")
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	// Wait for interrupt signal
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
-
-	log.Info("Shutting down tracer...")
+	// Stop tracer
+	t.Stop()
+	log.Info("Tracer stopped")
 }
 
 // logEvent logs a summary of the HTTP event

@@ -2,15 +2,21 @@ package tracer
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
+	"github.com/elastic/go-elasticsearch/v8"
+	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"github.com/sirupsen/logrus"
 )
 
@@ -33,15 +39,13 @@ type ProcessInfo struct {
 
 // HTTPEvent represents a captured HTTP event
 type HTTPEvent struct {
-	PID       uint32
-	TID       uint32
-	Timestamp uint64
-	Type      uint8
-	DataLen   uint32
-	ConnID    uint32 // Connection ID to correlate request/response
-	Data      [256]byte
-
-	// Parsed information (not part of the eBPF struct)
+	Type        uint8
+	PID         uint32
+	TID         uint32
+	Timestamp   uint64
+	ConnID      uint32
+	DataLen     uint32
+	Data        [256]byte
 	ProcessName string
 	Command     string
 	Method      string
@@ -56,11 +60,176 @@ func (e *HTTPEvent) Clone() *HTTPEvent {
 	return &clone
 }
 
-// Tracer manages the eBPF program and event collection
+// Storage interface for storing HTTP events
+type Storage interface {
+	Store(event HTTPEvent) error
+	Close() error
+}
+
+// FileStorage implements Storage interface for file-based storage
+type FileStorage struct {
+	dir    string
+	logger *logrus.Logger
+	mu     sync.Mutex
+}
+
+// NewFileStorage creates a new file-based storage
+func NewFileStorage(dir string) (Storage, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create storage directory: %w", err)
+	}
+
+	return &FileStorage{
+		dir:    dir,
+		logger: logrus.New(),
+	}, nil
+}
+
+// Store implements Storage interface
+func (s *FileStorage) Store(event HTTPEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Create a filename based on timestamp and PID
+	filename := fmt.Sprintf("%s/http_%d_%d.json", s.dir, event.PID, event.Timestamp)
+
+	// Create the document
+	doc := map[string]interface{}{
+		"timestamp":    time.Unix(0, int64(event.Timestamp)),
+		"type":         event.Type,
+		"pid":          event.PID,
+		"tid":          event.TID,
+		"process_name": event.ProcessName,
+		"command":      event.Command,
+		"method":       event.Method,
+		"url":          event.URL,
+		"status_code":  event.StatusCode,
+		"content_type": event.ContentType,
+		"data_len":     event.DataLen,
+		"data":         string(event.Data[:event.DataLen]),
+	}
+
+	// Marshal the document to JSON
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal document: %w", err)
+	}
+
+	// Write the file
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	s.logger.WithField("filename", filename).Debug("Stored HTTP event")
+	return nil
+}
+
+// Close implements Storage interface
+func (s *FileStorage) Close() error {
+	return nil
+}
+
+// ElasticsearchStorage implements Storage interface for Elasticsearch-based storage
+type ElasticsearchStorage struct {
+	url    string
+	index  string
+	client *elasticsearch.Client
+	logger *logrus.Logger
+}
+
+// NewElasticsearchStorage creates a new Elasticsearch-based storage
+func NewElasticsearchStorage(url, index string) (Storage, error) {
+	// Configure the client
+	cfg := elasticsearch.Config{
+		Addresses: []string{url},
+		// Add authentication if needed
+		// Username: "elastic",
+		// Password: "changeme",
+	}
+
+	// Create the client
+	client, err := elasticsearch.NewClient(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Elasticsearch client: %w", err)
+	}
+
+	// Check if the client is working
+	info, err := client.Info()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Elasticsearch info: %w", err)
+	}
+	defer info.Body.Close()
+
+	if info.IsError() {
+		return nil, fmt.Errorf("Elasticsearch info error: %s", info.String())
+	}
+
+	return &ElasticsearchStorage{
+		url:    url,
+		index:  index,
+		client: client,
+		logger: logrus.New(),
+	}, nil
+}
+
+// Store implements Storage interface
+func (s *ElasticsearchStorage) Store(event HTTPEvent) error {
+	// Create the document
+	doc := map[string]interface{}{
+		"timestamp":    time.Unix(0, int64(event.Timestamp)),
+		"type":         event.Type,
+		"pid":          event.PID,
+		"tid":          event.TID,
+		"process_name": event.ProcessName,
+		"command":      event.Command,
+		"method":       event.Method,
+		"url":          event.URL,
+		"status_code":  event.StatusCode,
+		"content_type": event.ContentType,
+		"data_len":     event.DataLen,
+		"data":         string(event.Data[:event.DataLen]),
+	}
+
+	// Marshal the document to JSON
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("failed to marshal document: %w", err)
+	}
+
+	// Create the index request
+	req := esapi.IndexRequest{
+		Index:      s.index,
+		DocumentID: fmt.Sprintf("%d-%d-%d", event.PID, event.TID, event.Timestamp),
+		Body:       bytes.NewReader(data),
+		Refresh:    "true",
+	}
+
+	// Perform the request
+	res, err := req.Do(context.Background(), s.client)
+	if err != nil {
+		return fmt.Errorf("failed to index document: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		return fmt.Errorf("error indexing document: %s", res.String())
+	}
+
+	return nil
+}
+
+// Close implements Storage interface
+func (s *ElasticsearchStorage) Close() error {
+	// The Elasticsearch client doesn't need explicit closing
+	return nil
+}
+
+// Tracer represents an HTTP traffic tracer
 type Tracer struct {
 	objs          *bpfObjects
 	perfReader    *perf.Reader
 	logger        *logrus.Logger
+	storage       Storage
 	eventCallback func(HTTPEvent)
 	stopChan      chan struct{}
 	uprobes       []link.Link
@@ -118,9 +287,14 @@ func findSSLPath() (string, error) {
 }
 
 // NewTracer creates a new HTTP tracer
-func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error) {
+func NewTracer(
+	logger *logrus.Logger,
+	storage Storage,
+	callback func(HTTPEvent),
+) (*Tracer, error) {
 	t := &Tracer{
 		logger:        logger,
+		storage:       storage,
 		eventCallback: callback,
 		stopChan:      make(chan struct{}),
 		uprobes:       make([]link.Link, 0),
@@ -336,35 +510,37 @@ func (t *Tracer) getProcessInfo(pid uint32) (name, cmdLine string) {
 	return name, cmdLine
 }
 
-// parseHTTPData attempts to parse HTTP data from the raw buffer
+// parseHTTPData parses HTTP data from the event
 func parseHTTPData(event *HTTPEvent) {
 	data := string(event.Data[:event.DataLen])
+	lines := strings.Split(data, "\r\n")
+	if len(lines) == 0 {
+		return
+	}
 
-	// Basic parsing for HTTP data
-	if event.Type == EventTypeSSLWrite { // Request
-		if parts := strings.Split(data, "\r\n"); len(parts) > 0 {
-			requestLine := parts[0]
-			if requestParts := strings.Split(requestLine, " "); len(requestParts) >= 2 {
-				event.Method = requestParts[0]
-				event.URL = requestParts[1]
+	// Parse request line or status line
+	firstLine := lines[0]
+	if strings.HasPrefix(firstLine, "HTTP/") {
+		// This is a response
+		parts := strings.Split(firstLine, " ")
+		if len(parts) >= 2 {
+			event.StatusCode, _ = strconv.Atoi(parts[1])
+		}
+		// Look for Content-Type header
+		for _, line := range lines[1:] {
+			if strings.HasPrefix(line, "Content-Type:") {
+				event.ContentType = strings.TrimSpace(
+					strings.TrimPrefix(line, "Content-Type:"),
+				)
+				break
 			}
 		}
-	} else if event.Type == EventTypeSSLRead { // Response
-		if parts := strings.Split(data, "\r\n"); len(parts) > 0 {
-			statusLine := parts[0]
-			if strings.HasPrefix(statusLine, "HTTP/") {
-				if statusParts := strings.Split(statusLine, " "); len(statusParts) >= 2 {
-					fmt.Sscanf(statusParts[1], "%d", &event.StatusCode)
-				}
-			}
-
-			// Look for Content-Type header
-			for _, line := range parts {
-				if strings.HasPrefix(strings.ToLower(line), "content-type:") {
-					event.ContentType = strings.TrimSpace(line[13:])
-					break
-				}
-			}
+	} else {
+		// This is a request
+		parts := strings.Split(firstLine, " ")
+		if len(parts) >= 2 {
+			event.Method = parts[0]
+			event.URL = parts[1]
 		}
 	}
 }
@@ -393,34 +569,32 @@ func (t *Tracer) pollEvents() {
 				continue
 			}
 
-			// Process the event based on its type
-			switch event.Type {
-			case EventTypeSSLRead, EventTypeSocketRead:
-				// This is a response
-				t.logger.WithFields(logrus.Fields{
-					"type":     event.Type,
-					"pid":      event.PID,
-					"tid":      event.TID,
-					"data_len": event.DataLen,
-					"data":     string(event.Data[:event.DataLen]),
-				}).Info("Received response")
-				if t.eventCallback != nil {
-					t.eventCallback(event)
-				}
-			case EventTypeSSLWrite, EventTypeSocketWrite:
-				// This is a request
-				t.logger.WithFields(logrus.Fields{
-					"type":     event.Type,
-					"pid":      event.PID,
-					"tid":      event.TID,
-					"data_len": event.DataLen,
-					"data":     string(event.Data[:event.DataLen]),
-				}).Info("Received request")
-				if t.eventCallback != nil {
-					t.eventCallback(event)
-				}
-			default:
-				t.logger.WithField("type", event.Type).Warn("Unknown event type")
+			// Get process info
+			name, cmdLine := t.getProcessInfo(event.PID)
+			event.ProcessName = name
+			event.Command = cmdLine
+
+			// Parse HTTP data
+			parseHTTPData(&event)
+
+			// Log the event
+			t.logger.WithFields(logrus.Fields{
+				"type":         event.Type,
+				"pid":          event.PID,
+				"tid":          event.TID,
+				"process_name": event.ProcessName,
+				"command":      event.Command,
+				"method":       event.Method,
+				"url":          event.URL,
+				"status_code":  event.StatusCode,
+				"content_type": event.ContentType,
+				"data_len":     event.DataLen,
+				"data":         string(event.Data[:event.DataLen]),
+			}).Debug("HTTP event received")
+
+			// Call the callback if set
+			if t.eventCallback != nil {
+				t.eventCallback(event)
 			}
 		}
 	}
@@ -452,4 +626,9 @@ func (t *Tracer) Close() error {
 	}
 
 	return nil
+}
+
+// SetEventCallback sets the callback function for HTTP events
+func (t *Tracer) SetEventCallback(callback func(HTTPEvent)) {
+	t.eventCallback = callback
 }
