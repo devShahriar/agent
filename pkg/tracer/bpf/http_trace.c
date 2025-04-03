@@ -57,7 +57,9 @@ static __always_inline unsigned int get_param3(struct pt_regs *ctx) {
 
 // Helper function to safely read user data
 static __always_inline int safe_read_user(void *dst, unsigned int size, const void *src) {
-    if (size == 0 || size > MAX_MSG_SIZE) {
+    // Ensure size is within bounds using bitwise AND
+    size &= (MAX_MSG_SIZE - 1);
+    if (size == 0) {
         return -1;
     }
     return bpf_probe_read_user(dst, size, src);
@@ -77,8 +79,8 @@ int trace_ssl_read(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SSL_READ;
     event.conn_id = (__u32)(unsigned long)get_param1(ctx);
 
-    // Copy data if it's not too large and buffer is valid
-    if (len > 0 && len <= MAX_MSG_SIZE && buf != NULL) {
+    // Copy data if buffer is valid
+    if (buf != NULL) {
         event.data_len = len;
         if (safe_read_user(event.data, len, buf) < 0) {
             event.data_len = 0;
@@ -104,8 +106,8 @@ int trace_ssl_write(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SSL_WRITE;
     event.conn_id = (__u32)(unsigned long)get_param1(ctx);
 
-    // Copy data if it's not too large and buffer is valid
-    if (len > 0 && len <= MAX_MSG_SIZE && buf != NULL) {
+    // Copy data if buffer is valid
+    if (buf != NULL) {
         event.data_len = len;
         if (safe_read_user(event.data, len, buf) < 0) {
             event.data_len = 0;
