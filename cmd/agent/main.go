@@ -90,6 +90,11 @@ func main() {
 			log.WithError(err).Fatal("Failed to create file storage")
 		}
 	case "elasticsearch":
+		log.WithFields(logrus.Fields{
+			"url":         *esURL,
+			"indexPrefix": *esPrefix,
+		}).Info("Connecting to Elasticsearch...")
+
 		esOpts := elasticsearch.Options{
 			URL:         *esURL,
 			BasicAuth:   *esAuth,
@@ -101,6 +106,7 @@ func main() {
 		if err != nil {
 			log.WithError(err).Fatal("Failed to create Elasticsearch storage")
 		}
+		log.Info("Successfully connected to Elasticsearch")
 	default:
 		log.Fatalf("Unknown storage type: %s", *storageType)
 	}
@@ -117,7 +123,16 @@ func main() {
 
 		// Save the event to storage
 		if err := storageManager.ProcessEvent(ctx, &event); err != nil {
-			log.WithError(err).Error("Failed to process event")
+			log.WithFields(logrus.Fields{
+				"error": err,
+				"pid":   event.PID,
+				"type":  event.Type,
+			}).Error("Failed to process event")
+		} else {
+			log.WithFields(logrus.Fields{
+				"pid":  event.PID,
+				"type": event.Type,
+			}).Debug("Successfully processed event")
 		}
 	})
 	if err != nil {
@@ -141,6 +156,7 @@ func main() {
 			select {
 			case <-cleanupTicker.C:
 				storageManager.CleanupOldConnections(5 * time.Minute)
+				log.Debug("Cleaned up old connections")
 			case <-ctx.Done():
 				return
 			}

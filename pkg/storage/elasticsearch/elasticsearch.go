@@ -117,18 +117,19 @@ func (s *Storage) createIndex(index string) error {
 		nil,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating HEAD request: %w", err)
 	}
 	s.addAuth(req)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("checking index existence: %w", err)
 	}
 	resp.Body.Close()
 
 	// If index exists, we're done
 	if resp.StatusCode == http.StatusOK {
+		fmt.Printf("Index %s already exists\n", index)
 		return nil
 	}
 
@@ -138,11 +139,21 @@ func (s *Storage) createIndex(index string) error {
 			"number_of_shards":   3,
 			"number_of_replicas": 1,
 		},
+		"mappings": map[string]interface{}{
+			"properties": map[string]interface{}{
+				"@timestamp": map[string]interface{}{
+					"type": "date",
+				},
+				"response_timestamp": map[string]interface{}{
+					"type": "date",
+				},
+			},
+		},
 	}
 
 	body, err := json.Marshal(indexSettings)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshaling index settings: %w", err)
 	}
 
 	req, err = http.NewRequest(
@@ -151,14 +162,14 @@ func (s *Storage) createIndex(index string) error {
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating PUT request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	s.addAuth(req)
 
 	resp, err = s.httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating index: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -170,6 +181,7 @@ func (s *Storage) createIndex(index string) error {
 		return fmt.Errorf("creating index: %v", errResp)
 	}
 
+	fmt.Printf("Successfully created index %s\n", index)
 	return nil
 }
 
@@ -285,59 +297,65 @@ func (s *Storage) flushTransactions() error {
 
 // sendBulk sends documents in bulk to Elasticsearch
 func (s *Storage) sendBulk(index string, docs []map[string]interface{}) error {
-	var buf bytes.Buffer
+	if len(docs) == 0 {
+		return nil
+	}
 
-	// Create bulk request
+	var buf bytes.Buffer
 	for _, doc := range docs {
-		// Add action line
-		action := map[string]interface{}{
+		// Add index header
+		header := map[string]interface{}{
 			"index": map[string]interface{}{
 				"_index": index,
 			},
 		}
-
-		actionJSON, err := json.Marshal(action)
-		if err != nil {
-			return err
+		if err := json.NewEncoder(&buf).Encode(header); err != nil {
+			return fmt.Errorf("encoding bulk header: %w", err)
 		}
-		buf.Write(actionJSON)
-		buf.WriteByte('\n')
 
 		// Add document
-		docJSON, err := json.Marshal(doc)
-		if err != nil {
-			return err
+		if err := json.NewEncoder(&buf).Encode(doc); err != nil {
+			return fmt.Errorf("encoding document: %w", err)
 		}
-		buf.Write(docJSON)
-		buf.WriteByte('\n')
 	}
 
-	// Send request
+	// Send bulk request
 	req, err := http.NewRequest(
 		http.MethodPost,
 		fmt.Sprintf("%s/_bulk", s.opts.URL),
 		&buf,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating bulk request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	s.addAuth(req)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("sending bulk request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode != http.StatusOK {
 		var errResp map[string]interface{}
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
-			return fmt.Errorf("bulk indexing: %s", resp.Status)
+			return fmt.Errorf("bulk request failed: %s", resp.Status)
 		}
-		return fmt.Errorf("bulk indexing: %v", errResp)
+		return fmt.Errorf("bulk request failed: %v", errResp)
 	}
 
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding bulk response: %w", err)
+	}
+
+	if errors, ok := result["errors"].(bool); ok && errors {
+		fmt.Printf("Bulk request had errors: %v\n", result)
+		return fmt.Errorf("bulk request had errors")
+	}
+
+	fmt.Printf("Successfully indexed %d documents to %s\n", len(docs), index)
 	return nil
 }
 
