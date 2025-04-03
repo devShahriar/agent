@@ -38,28 +38,36 @@ struct {
     __uint(value_size, sizeof(__u32));
 } events SEC(".maps");
 
-// Helper function to get function parameters
-#define PARAM1(ctx) ((void *)PT_REGS_PARM1(ctx))
-#define PARAM2(ctx) ((void *)PT_REGS_PARM2(ctx))
-#define PARAM3(ctx) ((void *)PT_REGS_PARM3(ctx))
-
 // Event types
 #define EVENT_TYPE_SSL_READ  1
 #define EVENT_TYPE_SSL_WRITE 2
+
+// Helper function to get function parameters
+static __always_inline void *get_param1(struct pt_regs *ctx) {
+    return (void *)PT_REGS_PARM1_CORE(ctx);
+}
+
+static __always_inline void *get_param2(struct pt_regs *ctx) {
+    return (void *)PT_REGS_PARM2_CORE(ctx);
+}
+
+static __always_inline int get_param3(struct pt_regs *ctx) {
+    return (int)PT_REGS_PARM3_CORE(ctx);
+}
 
 // Trace SSL_read
 SEC("uprobe/libssl.so.3:SSL_read")
 int trace_ssl_read(struct pt_regs *ctx) {
     http_event_t event = {};
-    void *buf = PARAM2(ctx);
-    int len = (int)PT_REGS_PARM3(ctx);
+    void *buf = get_param2(ctx);
+    int len = get_param3(ctx);
 
     // Get process and thread IDs
     event.pid = bpf_get_current_pid_tgid() >> 32;
     event.tid = (__u32)bpf_get_current_pid_tgid();
     event.timestamp = bpf_ktime_get_ns();
     event.type = EVENT_TYPE_SSL_READ;
-    event.conn_id = (__u32)PT_REGS_PARM1(ctx);
+    event.conn_id = (__u32)(unsigned long)get_param1(ctx);
 
     // Copy data if it's not too large
     if (len > 0 && len <= MAX_MSG_SIZE) {
@@ -76,15 +84,15 @@ int trace_ssl_read(struct pt_regs *ctx) {
 SEC("uprobe/libssl.so.3:SSL_write")
 int trace_ssl_write(struct pt_regs *ctx) {
     http_event_t event = {};
-    void *buf = PARAM2(ctx);
-    int len = (int)PT_REGS_PARM3(ctx);
+    void *buf = get_param2(ctx);
+    int len = get_param3(ctx);
 
     // Get process and thread IDs
     event.pid = bpf_get_current_pid_tgid() >> 32;
     event.tid = (__u32)bpf_get_current_pid_tgid();
     event.timestamp = bpf_ktime_get_ns();
     event.type = EVENT_TYPE_SSL_WRITE;
-    event.conn_id = (__u32)PT_REGS_PARM1(ctx);
+    event.conn_id = (__u32)(unsigned long)get_param1(ctx);
 
     // Copy data if it's not too large
     if (len > 0 && len <= MAX_MSG_SIZE) {
