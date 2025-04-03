@@ -151,6 +151,9 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 			LogLevel: 1,
 			LogSize:  65535,
 		},
+		Maps: ebpf.MapOptions{
+			PinPath: "/sys/fs/bpf/abproxy",
+		},
 	}
 
 	// Load BPF objects

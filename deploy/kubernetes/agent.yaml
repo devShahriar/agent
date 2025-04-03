@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: abproxy-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: abproxy-agent
+  template:
+    metadata:
+      labels:
+        app: abproxy-agent
+    spec:
+      serviceAccountName: abproxy-agent
+      containers:
+        - name: abproxy-agent
+          image: devshahriar/abproxy-agent:v1.22.0
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - NET_ADMIN
+                - SYS_PTRACE
+          volumeMounts:
+            - name: bpf
+              mountPath: /sys/fs/bpf
+            - name: debug
+              mountPath: /sys/kernel/debug
+            - name: proc
+              mountPath: /proc
+              readOnly: true
+      volumes:
+        - name: bpf
+          hostPath:
+            path: /sys/fs/bpf
+        - name: debug
+          hostPath:
+            path: /sys/kernel/debug
+        - name: proc
+          hostPath:
+            path: /proc
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: abproxy-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: abproxy-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: abproxy-agent
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: abproxy-agent
+roleRef:
+  kind: ClusterRole
+  name: abproxy-agent
+  apiGroup: rbac.authorization.k8s.io

@@ -36,7 +36,27 @@ struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(__u32));
-} events SEC(".maps");
+    __uint(max_entries, 1024);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} events SEC(".maps") = {};
+
+// Map to store connection state
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
+    __uint(max_entries, 1024);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} conn_state SEC(".maps") = {};
+
+// Map to store process info
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(struct process_info));
+    __uint(max_entries, 1024);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} process_info SEC(".maps") = {};
 
 // Event types
 #define EVENT_TYPE_SSL_READ  1
@@ -79,11 +99,13 @@ static __always_inline int is_http_data(const char *data, size_t len) {
         (data[0] == 'P' && data[1] == 'U' && data[2] == 'T') ||
         (data[0] == 'H' && data[1] == 'E' && data[2] == 'A') ||
         (data[0] == 'D' && data[1] == 'E' && data[2] == 'L')) {
+        bpf_printk("HTTP method detected: %c%c%c", data[0], data[1], data[2]);
         return 1;
     }
     
     // Check for HTTP response
     if (len >= 4 && data[0] == 'H' && data[1] == 'T' && data[2] == 'T' && data[3] == 'P') {
+        bpf_printk("HTTP response detected");
         return 1;
     }
     
@@ -186,9 +208,14 @@ int trace_tcp_recv(struct pt_regs *ctx) {
     event.conn_id = (__u32)(unsigned long)sk;
 
     // Log debug information
-    bpf_printk("TCP recv: pid=%d", event.pid);
-    bpf_printk("TCP recv: sk=%p", sk);
-    bpf_printk("TCP recv: len=%d", len);
+    bpf_printk("TCP recv: pid=%d tid=%d sk=%p len=%d", event.pid, event.tid, sk, len);
+
+    // Update connection state
+    __u32 *state = bpf_map_lookup_elem(&conn_state, &event.conn_id);
+    if (!state) {
+        __u32 new_state = 1;
+        bpf_map_update_elem(&conn_state, &event.conn_id, &new_state, BPF_ANY);
+    }
 
     // Copy data if buffer is valid
     if (buf != NULL) {
@@ -203,7 +230,7 @@ int trace_tcp_recv(struct pt_regs *ctx) {
         } else {
             // Check if this looks like HTTP traffic
             if (is_http_data(event.data, event.data_len)) {
-                bpf_printk("TCP recv: HTTP traffic detected");
+                bpf_printk("TCP recv: HTTP traffic detected, sending event");
                 bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
             }
         }
@@ -230,9 +257,14 @@ int trace_tcp_send(struct pt_regs *ctx) {
     event.conn_id = (__u32)(unsigned long)sk;
 
     // Log debug information
-    bpf_printk("TCP send: pid=%d", event.pid);
-    bpf_printk("TCP send: sk=%p", sk);
-    bpf_printk("TCP send: len=%d", len);
+    bpf_printk("TCP send: pid=%d tid=%d sk=%p len=%d", event.pid, event.tid, sk, len);
+
+    // Update connection state
+    __u32 *state = bpf_map_lookup_elem(&conn_state, &event.conn_id);
+    if (!state) {
+        __u32 new_state = 1;
+        bpf_map_update_elem(&conn_state, &event.conn_id, &new_state, BPF_ANY);
+    }
 
     // Copy data if buffer is valid
     if (buf != NULL) {
@@ -247,7 +279,7 @@ int trace_tcp_send(struct pt_regs *ctx) {
         } else {
             // Check if this looks like HTTP traffic
             if (is_http_data(event.data, event.data_len)) {
-                bpf_printk("TCP send: HTTP traffic detected");
+                bpf_printk("TCP send: HTTP traffic detected, sending event");
                 bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
             }
         }
