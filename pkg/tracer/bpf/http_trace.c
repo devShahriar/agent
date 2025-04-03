@@ -404,7 +404,7 @@ int trace_tcp_connect(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SOCKET_WRITE;
 
     // Log debug information
-    bpf_printk("tcp_v4_connect: pid=%d sk=%p", event.pid, sk);
+    bpf_printk("tcp_v4_connect: pid=%d sk=%p addr=%p", event.pid, sk, addr);
 
     // Update connection state
     __u32 *state = bpf_map_lookup_elem(&conn_state, &event.conn_id);
