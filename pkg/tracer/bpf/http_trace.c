@@ -69,6 +69,27 @@ static __always_inline int safe_read_user(void *dst, unsigned int size, const vo
     return bpf_probe_read_user(dst, size, src);
 }
 
+// Helper function to check if data looks like HTTP
+static __always_inline int is_http_data(const char *data, size_t len) {
+    if (len < 3) return 0;
+    
+    // Check for HTTP methods
+    if ((data[0] == 'G' && data[1] == 'E' && data[2] == 'T') ||
+        (data[0] == 'P' && data[1] == 'O' && data[2] == 'S') ||
+        (data[0] == 'P' && data[1] == 'U' && data[2] == 'T') ||
+        (data[0] == 'H' && data[1] == 'E' && data[2] == 'A') ||
+        (data[0] == 'D' && data[1] == 'E' && data[2] == 'L')) {
+        return 1;
+    }
+    
+    // Check for HTTP response
+    if (len >= 4 && data[0] == 'H' && data[1] == 'T' && data[2] == 'T' && data[3] == 'P') {
+        return 1;
+    }
+    
+    return 0;
+}
+
 // Trace SSL_read
 SEC("uprobe/libssl.so.3:SSL_read")
 int trace_ssl_read(struct pt_regs *ctx) {
@@ -96,14 +117,16 @@ int trace_ssl_read(struct pt_regs *ctx) {
             event.data_len = 0;
             bpf_printk("SSL_read: failed to read data");
         } else {
-            bpf_printk("SSL_read: read %d bytes", event.data_len);
+            // Check if this looks like HTTP traffic
+            if (is_http_data(event.data, event.data_len)) {
+                bpf_printk("SSL_read: HTTP traffic detected");
+                bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            }
         }
     } else {
         bpf_printk("SSL_read: invalid buffer");
     }
 
-    // Send event to userspace
-    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     return 0;
 }
 
@@ -134,100 +157,104 @@ int trace_ssl_write(struct pt_regs *ctx) {
             event.data_len = 0;
             bpf_printk("SSL_write: failed to read data");
         } else {
-            bpf_printk("SSL_write: read %d bytes", event.data_len);
+            // Check if this looks like HTTP traffic
+            if (is_http_data(event.data, event.data_len)) {
+                bpf_printk("SSL_write: HTTP traffic detected");
+                bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            }
         }
     } else {
         bpf_printk("SSL_write: invalid buffer");
     }
 
-    // Send event to userspace
-    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     return 0;
 }
 
-// Trace socket read
-SEC("kprobe/sys_read")
-int trace_socket_read(struct pt_regs *ctx) {
+// Trace TCP receive
+SEC("kprobe/tcp_recvmsg")
+int trace_tcp_recv(struct pt_regs *ctx) {
     http_event_t event = {};
-    int fd = (int)ctx->rdi;
+    struct sock *sk = (struct sock *)ctx->rdi;
     void *buf = (void *)ctx->rsi;
     size_t len = (size_t)ctx->rdx;
-
-    // Only trace socket reads
-    if (fd < 3) { // Skip stdin, stdout, stderr
-        return 0;
-    }
 
     // Get process and thread IDs
     event.pid = bpf_get_current_pid_tgid() >> 32;
     event.tid = (__u32)bpf_get_current_pid_tgid();
     event.timestamp = bpf_ktime_get_ns();
     event.type = EVENT_TYPE_SOCKET_READ;
-    event.conn_id = fd;
+    event.conn_id = (__u32)(unsigned long)sk;
 
     // Log debug information
-    bpf_printk("Socket read: pid=%d", event.pid);
-    bpf_printk("Socket read: fd=%d", fd);
-    bpf_printk("Socket read: len=%d", len);
+    bpf_printk("TCP recv: pid=%d", event.pid);
+    bpf_printk("TCP recv: sk=%p", sk);
+    bpf_printk("TCP recv: len=%d", len);
 
     // Copy data if buffer is valid
     if (buf != NULL) {
+        // Ensure we don't exceed our buffer size
+        if (len > MAX_MSG_SIZE) {
+            len = MAX_MSG_SIZE;
+        }
         event.data_len = len;
         if (safe_read_user(event.data, len, buf) < 0) {
             event.data_len = 0;
-            bpf_printk("Socket read: failed to read data");
+            bpf_printk("TCP recv: failed to read data");
         } else {
-            bpf_printk("Socket read: read %d bytes", event.data_len);
+            // Check if this looks like HTTP traffic
+            if (is_http_data(event.data, event.data_len)) {
+                bpf_printk("TCP recv: HTTP traffic detected");
+                bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            }
         }
     } else {
-        bpf_printk("Socket read: invalid buffer");
+        bpf_printk("TCP recv: invalid buffer");
     }
 
-    // Send event to userspace
-    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     return 0;
 }
 
-// Trace socket write
-SEC("kprobe/sys_write")
-int trace_socket_write(struct pt_regs *ctx) {
+// Trace TCP send
+SEC("kprobe/tcp_sendmsg")
+int trace_tcp_send(struct pt_regs *ctx) {
     http_event_t event = {};
-    int fd = (int)ctx->rdi;
+    struct sock *sk = (struct sock *)ctx->rdi;
     void *buf = (void *)ctx->rsi;
     size_t len = (size_t)ctx->rdx;
-
-    // Only trace socket writes
-    if (fd < 3) { // Skip stdin, stdout, stderr
-        return 0;
-    }
 
     // Get process and thread IDs
     event.pid = bpf_get_current_pid_tgid() >> 32;
     event.tid = (__u32)bpf_get_current_pid_tgid();
     event.timestamp = bpf_ktime_get_ns();
     event.type = EVENT_TYPE_SOCKET_WRITE;
-    event.conn_id = fd;
+    event.conn_id = (__u32)(unsigned long)sk;
 
     // Log debug information
-    bpf_printk("Socket write: pid=%d", event.pid);
-    bpf_printk("Socket write: fd=%d", fd);
-    bpf_printk("Socket write: len=%d", len);
+    bpf_printk("TCP send: pid=%d", event.pid);
+    bpf_printk("TCP send: sk=%p", sk);
+    bpf_printk("TCP send: len=%d", len);
 
     // Copy data if buffer is valid
     if (buf != NULL) {
+        // Ensure we don't exceed our buffer size
+        if (len > MAX_MSG_SIZE) {
+            len = MAX_MSG_SIZE;
+        }
         event.data_len = len;
         if (safe_read_user(event.data, len, buf) < 0) {
             event.data_len = 0;
-            bpf_printk("Socket write: failed to read data");
+            bpf_printk("TCP send: failed to read data");
         } else {
-            bpf_printk("Socket write: read %d bytes", event.data_len);
+            // Check if this looks like HTTP traffic
+            if (is_http_data(event.data, event.data_len)) {
+                bpf_printk("TCP send: HTTP traffic detected");
+                bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            }
         }
     } else {
-        bpf_printk("Socket write: invalid buffer");
+        bpf_printk("TCP send: invalid buffer");
     }
 
-    // Send event to userspace
-    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     return 0;
 }
 
