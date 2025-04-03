@@ -55,6 +55,14 @@ static __always_inline unsigned int get_param3(struct pt_regs *ctx) {
     return (unsigned int)ctx->rdx;
 }
 
+// Helper function to safely read user data
+static __always_inline int safe_read_user(void *dst, unsigned int size, const void *src) {
+    if (size == 0 || size > MAX_MSG_SIZE) {
+        return -1;
+    }
+    return bpf_probe_read_user(dst, size, src);
+}
+
 // Trace SSL_read
 SEC("uprobe/libssl.so.3:SSL_read")
 int trace_ssl_read(struct pt_regs *ctx) {
@@ -69,10 +77,12 @@ int trace_ssl_read(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SSL_READ;
     event.conn_id = (__u32)(unsigned long)get_param1(ctx);
 
-    // Copy data if it's not too large
-    if (len > 0 && len <= MAX_MSG_SIZE) {
+    // Copy data if it's not too large and buffer is valid
+    if (len > 0 && len <= MAX_MSG_SIZE && buf != NULL) {
         event.data_len = len;
-        bpf_probe_read_user(event.data, len, buf);
+        if (safe_read_user(event.data, len, buf) < 0) {
+            event.data_len = 0;
+        }
     }
 
     // Send event to userspace
@@ -94,10 +104,12 @@ int trace_ssl_write(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SSL_WRITE;
     event.conn_id = (__u32)(unsigned long)get_param1(ctx);
 
-    // Copy data if it's not too large
-    if (len > 0 && len <= MAX_MSG_SIZE) {
+    // Copy data if it's not too large and buffer is valid
+    if (len > 0 && len <= MAX_MSG_SIZE && buf != NULL) {
         event.data_len = len;
-        bpf_probe_read_user(event.data, len, buf);
+        if (safe_read_user(event.data, len, buf) < 0) {
+            event.data_len = 0;
+        }
     }
 
     // Send event to userspace
