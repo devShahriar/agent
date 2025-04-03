@@ -215,7 +215,10 @@ int trace_tcp_recv(struct pt_regs *ctx) {
     event.conn_id = (__u32)(unsigned long)sk;
 
     // Log debug information
-    bpf_printk("TCP recv: pid=%d tid=%d sk=%p len=%d", event.pid, event.tid, sk, len);
+    bpf_printk("TCP recv: pid=%d", event.pid);
+    bpf_printk("TCP recv: tid=%d", event.tid);
+    bpf_printk("TCP recv: sk=%p", sk);
+    bpf_printk("TCP recv: len=%d", len);
 
     // Update connection state
     __u32 *state = bpf_map_lookup_elem(&conn_state, &event.conn_id);
@@ -264,7 +267,10 @@ int trace_tcp_send(struct pt_regs *ctx) {
     event.conn_id = (__u32)(unsigned long)sk;
 
     // Log debug information
-    bpf_printk("TCP send: pid=%d tid=%d sk=%p len=%d", event.pid, event.tid, sk, len);
+    bpf_printk("TCP send: pid=%d", event.pid);
+    bpf_printk("TCP send: tid=%d", event.tid);
+    bpf_printk("TCP send: sk=%p", sk);
+    bpf_printk("TCP send: len=%d", len);
 
     // Update connection state
     __u32 *state = bpf_map_lookup_elem(&conn_state, &event.conn_id);
