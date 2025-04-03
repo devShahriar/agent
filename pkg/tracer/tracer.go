@@ -145,7 +145,8 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 	}
 
 	// Create application directory in BPF filesystem
-	if err := os.MkdirAll("/sys/fs/bpf/abproxy", 0700); err != nil {
+	bpfDir := "/sys/fs/bpf/abproxy"
+	if err := os.MkdirAll(bpfDir, 0700); err != nil {
 		if logger != nil {
 			logger.WithError(err).
 				Info("Failed to create BPF subdirectory, continuing anyway")
@@ -159,7 +160,7 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 			LogSize:  65535,
 		},
 		Maps: ebpf.MapOptions{
-			PinPath: "/sys/fs/bpf/abproxy",
+			PinPath: bpfDir,
 		},
 	}
 
@@ -221,8 +222,18 @@ func loadSSLPrograms() (*ebpf.Program, *ebpf.Program, error) {
 		}
 	}
 
-	// Load the collection
-	coll, err := ebpf.NewCollection(spec)
+	// Set up map options for pinning
+	bpfDir := "/sys/fs/bpf/abproxy"
+	if err := os.MkdirAll(bpfDir, 0700); err != nil {
+		return nil, nil, fmt.Errorf("creating BPF directory: %w", err)
+	}
+
+	// Load the collection with pinning options
+	coll, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{
+		Maps: ebpf.MapOptions{
+			PinPath: bpfDir,
+		},
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating BPF collection: %w", err)
 	}
