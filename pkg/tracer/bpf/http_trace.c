@@ -313,6 +313,83 @@ int trace_tcp_send(struct pt_regs *ctx) {
     return 0;
 }
 
+// Add new kprobes for socket operations
+SEC("kprobe/sys_read")
+int trace_sys_read(struct pt_regs *ctx) {
+    http_event_t event = {};
+    int fd = (int)ctx->rdi;
+    void *buf = (void *)ctx->rsi;
+    size_t count = (size_t)ctx->rdx;
+
+    // Get process and thread IDs
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.tid = (__u32)bpf_get_current_pid_tgid();
+    event.timestamp = bpf_ktime_get_ns();
+    event.type = EVENT_TYPE_SOCKET_READ;
+
+    // Log debug information
+    bpf_printk("sys_read: pid=%d fd=%d count=%d", event.pid, fd, count);
+
+    // Copy data if buffer is valid
+    if (buf != NULL) {
+        // Ensure we don't exceed our buffer size
+        if (count > MAX_MSG_SIZE) {
+            count = MAX_MSG_SIZE;
+        }
+        event.data_len = count;
+        if (safe_read_user(event.data, count, buf) < 0) {
+            event.data_len = 0;
+            bpf_printk("sys_read: failed to read data");
+        } else {
+            // Check if this looks like HTTP traffic
+            if (is_http_data(event.data, event.data_len)) {
+                bpf_printk("sys_read: HTTP traffic detected, sending event");
+                bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            }
+        }
+    }
+
+    return 0;
+}
+
+SEC("kprobe/sys_write")
+int trace_sys_write(struct pt_regs *ctx) {
+    http_event_t event = {};
+    int fd = (int)ctx->rdi;
+    void *buf = (void *)ctx->rsi;
+    size_t count = (size_t)ctx->rdx;
+
+    // Get process and thread IDs
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.tid = (__u32)bpf_get_current_pid_tgid();
+    event.timestamp = bpf_ktime_get_ns();
+    event.type = EVENT_TYPE_SOCKET_WRITE;
+
+    // Log debug information
+    bpf_printk("sys_write: pid=%d fd=%d count=%d", event.pid, fd, count);
+
+    // Copy data if buffer is valid
+    if (buf != NULL) {
+        // Ensure we don't exceed our buffer size
+        if (count > MAX_MSG_SIZE) {
+            count = MAX_MSG_SIZE;
+        }
+        event.data_len = count;
+        if (safe_read_user(event.data, count, buf) < 0) {
+            event.data_len = 0;
+            bpf_printk("sys_write: failed to read data");
+        } else {
+            // Check if this looks like HTTP traffic
+            if (is_http_data(event.data, event.data_len)) {
+                bpf_printk("sys_write: HTTP traffic detected, sending event");
+                bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            }
+        }
+    }
+
+    return 0;
+}
+
 // Explicitly set program version to avoid vDSO lookup
 __u32 _version SEC("version") = 0xFFFFFFFE;
 
