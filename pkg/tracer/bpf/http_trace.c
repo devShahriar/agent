@@ -44,15 +44,15 @@ struct {
 
 // Helper function to get function parameters
 static __always_inline void *get_param1(struct pt_regs *ctx) {
-    return (void *)PT_REGS_PARM1_CORE(ctx);
+    return (void *)ctx->di;
 }
 
 static __always_inline void *get_param2(struct pt_regs *ctx) {
-    return (void *)PT_REGS_PARM2_CORE(ctx);
+    return (void *)ctx->si;
 }
 
 static __always_inline int get_param3(struct pt_regs *ctx) {
-    return (int)PT_REGS_PARM3_CORE(ctx);
+    return (int)ctx->dx;
 }
 
 // Trace SSL_read
