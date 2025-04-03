@@ -18,8 +18,10 @@ import (
 
 // Event types
 const (
-	EventTypeSSLRead  = 1 // Response
-	EventTypeSSLWrite = 2 // Request
+	EventTypeSSLRead     = 1 // Response
+	EventTypeSSLWrite    = 2 // Request
+	EventTypeSocketRead  = 3 // Response
+	EventTypeSocketWrite = 4 // Request
 )
 
 // HTTPEvent represents a captured HTTP event
@@ -92,6 +94,11 @@ func findSSLPath() (string, error) {
 		"/usr/lib/aarch64-linux-gnu/libssl.so.3",
 		"/usr/lib/aarch64-linux-gnu/libssl.so.1.1",
 		"/lib/aarch64-linux-gnu/libssl.so.1.1",
+		// Additional paths for container environments
+		"/usr/local/lib/libssl.so.3",
+		"/usr/local/lib/libssl.so.1.1",
+		"/opt/lib/libssl.so.3",
+		"/opt/lib/libssl.so.1.1",
 	}
 
 	for _, path := range paths {
@@ -185,9 +192,23 @@ func NewTracer(logger *logrus.Logger, callback func(HTTPEvent)) (*Tracer, error)
 // LoadSSLPrograms loads SSL tracing programs without using vDSO
 func loadSSLPrograms() (*ebpf.Program, *ebpf.Program, error) {
 	// Try to load from the current directory first
-	spec, err := ebpf.LoadCollectionSpec("/app/pkg/tracer/bpf_bpfel.o")
+	spec, err := ebpf.LoadCollectionSpec("bpf_bpfel.o")
 	if err != nil {
-		return nil, nil, fmt.Errorf("loading BPF spec: %w", err)
+		// Try alternative paths
+		paths := []string{
+			"/app/pkg/tracer/bpf_bpfel.o",
+			"./pkg/tracer/bpf_bpfel.o",
+			"bpf_bpfel.o",
+		}
+		for _, path := range paths {
+			spec, err = ebpf.LoadCollectionSpec(path)
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("loading BPF spec: %w", err)
+		}
 	}
 
 	// Load the collection
@@ -221,106 +242,70 @@ func (t *Tracer) Start() error {
 	// Find SSL library
 	sslPath, err := findSSLPath()
 	if err != nil {
-		return fmt.Errorf("finding SSL library: %w", err)
-	}
-
-	if t.logger != nil {
-		t.logger.WithField("ssl_path", sslPath).Info("Found SSL library")
-	}
-
-	// Open the SSL library
-	ex, err := link.OpenExecutable(sslPath)
-	if err != nil {
-		return fmt.Errorf("opening SSL library: %w", err)
-	}
-
-	// Load SSL programs manually to avoid vDSO issues
-	sslReadProg, sslWriteProg, err := loadSSLPrograms()
-	if err != nil {
 		if t.logger != nil {
 			t.logger.WithError(err).
-				Warn("Manual program loading failed, falling back to preloaded programs")
-		}
-
-		// Fall back to the already loaded objects if manual loading fails
-		if t.objs == nil {
-			return fmt.Errorf("no BPF objects available: %w", err)
-		}
-
-		// Attach to SSL_read with retries using preloaded programs
-		for i := 0; i < 3; i++ {
-			readUprobe, err := ex.Uprobe("SSL_read", t.objs.TraceSslRead, nil)
-			if err == nil {
-				t.uprobes = append(t.uprobes, readUprobe)
-				if t.logger != nil {
-					t.logger.Info("Successfully attached SSL_read uprobe")
-				}
-				break
-			}
-			if i == 2 {
-				return fmt.Errorf("attaching SSL_read uprobe: %w", err)
-			}
-			if t.logger != nil {
-				t.logger.WithError(err).Warn("Retrying SSL_read uprobe attachment")
-			}
-		}
-
-		// Attach to SSL_write with retries using preloaded programs
-		for i := 0; i < 3; i++ {
-			writeUprobe, err := ex.Uprobe("SSL_write", t.objs.TraceSslWrite, nil)
-			if err == nil {
-				t.uprobes = append(t.uprobes, writeUprobe)
-				if t.logger != nil {
-					t.logger.Info("Successfully attached SSL_write uprobe")
-				}
-				break
-			}
-			if i == 2 {
-				return fmt.Errorf("attaching SSL_write uprobe: %w", err)
-			}
-			if t.logger != nil {
-				t.logger.WithError(err).Warn("Retrying SSL_write uprobe attachment")
-			}
+				Warn("Could not find SSL library, will only trace socket operations")
 		}
 	} else {
-		// Use the manually loaded programs
 		if t.logger != nil {
-			t.logger.Info("Using manually loaded SSL trace programs")
+			t.logger.WithField("ssl_path", sslPath).Info("Found SSL library")
 		}
 
-		// Attach to SSL_read with retries
-		for i := 0; i < 3; i++ {
-			readUprobe, err := ex.Uprobe("SSL_read", sslReadProg, nil)
-			if err == nil {
-				t.uprobes = append(t.uprobes, readUprobe)
-				if t.logger != nil {
-					t.logger.Info("Successfully attached SSL_read uprobe")
-				}
-				break
-			}
-			if i == 2 {
-				return fmt.Errorf("attaching SSL_read uprobe: %w", err)
-			}
+		// Open the SSL library
+		ex, err := link.OpenExecutable(sslPath)
+		if err != nil {
 			if t.logger != nil {
-				t.logger.WithError(err).Warn("Retrying SSL_read uprobe attachment")
+				t.logger.WithError(err).Warn("Could not open SSL library, will only trace socket operations")
 			}
-		}
+		} else {
+			// Load SSL programs manually to avoid vDSO issues
+			_, _, err := loadSSLPrograms()
+			if err != nil {
+				if t.logger != nil {
+					t.logger.WithError(err).
+						Warn("Manual program loading failed, falling back to preloaded programs")
+				}
 
-		// Attach to SSL_write with retries
-		for i := 0; i < 3; i++ {
-			writeUprobe, err := ex.Uprobe("SSL_write", sslWriteProg, nil)
-			if err == nil {
-				t.uprobes = append(t.uprobes, writeUprobe)
-				if t.logger != nil {
-					t.logger.Info("Successfully attached SSL_write uprobe")
+				// Fall back to the already loaded objects if manual loading fails
+				if t.objs == nil {
+					if t.logger != nil {
+						t.logger.Error("No BPF objects available for SSL tracing")
+					}
+				} else {
+					// Attach to SSL_read with retries using preloaded programs
+					for i := 0; i < 3; i++ {
+						readUprobe, err := ex.Uprobe("SSL_read", t.objs.TraceSslRead, nil)
+						if err == nil {
+							t.uprobes = append(t.uprobes, readUprobe)
+							if t.logger != nil {
+								t.logger.Info("Successfully attached SSL_read uprobe")
+							}
+							break
+						}
+						if i == 2 {
+							if t.logger != nil {
+								t.logger.WithError(err).Error("Failed to attach SSL_read uprobe")
+							}
+						}
+					}
+
+					// Attach to SSL_write with retries using preloaded programs
+					for i := 0; i < 3; i++ {
+						writeUprobe, err := ex.Uprobe("SSL_write", t.objs.TraceSslWrite, nil)
+						if err == nil {
+							t.uprobes = append(t.uprobes, writeUprobe)
+							if t.logger != nil {
+								t.logger.Info("Successfully attached SSL_write uprobe")
+							}
+							break
+						}
+						if i == 2 {
+							if t.logger != nil {
+								t.logger.WithError(err).Error("Failed to attach SSL_write uprobe")
+							}
+						}
+					}
 				}
-				break
-			}
-			if i == 2 {
-				return fmt.Errorf("attaching SSL_write uprobe: %w", err)
-			}
-			if t.logger != nil {
-				t.logger.WithError(err).Warn("Retrying SSL_write uprobe attachment")
 			}
 		}
 	}
@@ -400,72 +385,66 @@ func parseHTTPData(event *HTTPEvent) {
 
 // pollEvents reads events from the perf buffer
 func (t *Tracer) pollEvents() {
-	var event HTTPEvent
 	for {
 		select {
 		case <-t.stopChan:
 			return
 		default:
+			// Read events from the ring buffer
 			record, err := t.perfReader.Read()
 			if err != nil {
+				if err == perf.ErrClosed {
+					return
+				}
 				if t.logger != nil {
-					t.logger.WithError(err).Error("Error reading from perf buffer")
+					t.logger.WithError(err).Error("Error reading from ring buffer")
 				}
 				continue
 			}
 
-			// Parse the raw event
-			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &event); err != nil {
+			// Parse the event
+			var event HTTPEvent
+			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
 				if t.logger != nil {
 					t.logger.WithError(err).Error("Error parsing event")
 				}
 				continue
 			}
 
-			// Get process info
-			event.ProcessName, event.Command = t.getProcessInfo(event.PID)
-
-			// Parse HTTP data
-			parseHTTPData(&event)
-
-			// Log the event details
-			if t.logger != nil {
-				t.logger.WithFields(logrus.Fields{
-					"pid":         event.PID,
-					"process":     event.ProcessName,
-					"type":        event.Type,
-					"method":      event.Method,
-					"url":         event.URL,
-					"status_code": event.StatusCode,
-				}).Info("Captured HTTP event")
-			}
-
-			// Track connections to correlate requests and responses
-			if event.Type == EventTypeSSLWrite {
-				// Save request for correlation with response
-				t.connMu.Lock()
-				t.connections[event.ConnID] = &event
-				t.connMu.Unlock()
-			} else if event.Type == EventTypeSSLRead {
-				// Try to correlate with existing request
-				t.connMu.RLock()
-				reqEvent, exists := t.connections[event.ConnID]
-				t.connMu.RUnlock()
-
-				if exists {
-					if t.logger != nil {
-						t.logger.WithFields(logrus.Fields{
-							"url":    reqEvent.URL,
-							"method": reqEvent.Method,
-							"status": event.StatusCode,
-						}).Info("Correlated request-response")
-					}
+			// Process the event based on its type
+			switch event.Type {
+			case EventTypeSSLRead, EventTypeSocketRead:
+				// This is a response
+				if t.logger != nil {
+					t.logger.WithFields(logrus.Fields{
+						"type":     event.Type,
+						"pid":      event.PID,
+						"tid":      event.TID,
+						"data_len": event.DataLen,
+						"data":     string(event.Data[:event.DataLen]),
+					}).Info("Received response")
 				}
-			}
-
-			// Call the callback
-			if t.eventCallback != nil {
-				t.eventCallback(event)
+				if t.eventCallback != nil {
+					t.eventCallback(event)
+				}
+			case EventTypeSSLWrite, EventTypeSocketWrite:
+				// This is a request
+				if t.logger != nil {
+					t.logger.WithFields(logrus.Fields{
+						"type":     event.Type,
+						"pid":      event.PID,
+						"tid":      event.TID,
+						"data_len": event.DataLen,
+						"data":     string(event.Data[:event.DataLen]),
+					}).Info("Received request")
+				}
+				if t.eventCallback != nil {
+					t.eventCallback(event)
+				}
+			default:
+				if t.logger != nil {
+					t.logger.WithField("type", event.Type).Warn("Unknown event type")
+				}
 			}
 		}
 	}

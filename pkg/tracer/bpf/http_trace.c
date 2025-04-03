@@ -42,6 +42,10 @@ struct {
 #define EVENT_TYPE_SSL_READ  1
 #define EVENT_TYPE_SSL_WRITE 2
 
+// Socket event types
+#define EVENT_TYPE_SOCKET_READ  3
+#define EVENT_TYPE_SOCKET_WRITE 4
+
 // Helper function to get function parameters
 static __always_inline void *get_param1(struct pt_regs *ctx) {
     return (void *)ctx->rdi;
@@ -134,6 +138,92 @@ int trace_ssl_write(struct pt_regs *ctx) {
         }
     } else {
         bpf_printk("SSL_write: invalid buffer");
+    }
+
+    // Send event to userspace
+    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+    return 0;
+}
+
+// Trace socket read
+SEC("kprobe/sys_read")
+int trace_socket_read(struct pt_regs *ctx) {
+    http_event_t event = {};
+    int fd = (int)ctx->rdi;
+    void *buf = (void *)ctx->rsi;
+    size_t len = (size_t)ctx->rdx;
+
+    // Only trace socket reads
+    if (fd < 3) { // Skip stdin, stdout, stderr
+        return 0;
+    }
+
+    // Get process and thread IDs
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.tid = (__u32)bpf_get_current_pid_tgid();
+    event.timestamp = bpf_ktime_get_ns();
+    event.type = EVENT_TYPE_SOCKET_READ;
+    event.conn_id = fd;
+
+    // Log debug information
+    bpf_printk("Socket read: pid=%d", event.pid);
+    bpf_printk("Socket read: fd=%d", fd);
+    bpf_printk("Socket read: len=%d", len);
+
+    // Copy data if buffer is valid
+    if (buf != NULL) {
+        event.data_len = len;
+        if (safe_read_user(event.data, len, buf) < 0) {
+            event.data_len = 0;
+            bpf_printk("Socket read: failed to read data");
+        } else {
+            bpf_printk("Socket read: read %d bytes", event.data_len);
+        }
+    } else {
+        bpf_printk("Socket read: invalid buffer");
+    }
+
+    // Send event to userspace
+    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+    return 0;
+}
+
+// Trace socket write
+SEC("kprobe/sys_write")
+int trace_socket_write(struct pt_regs *ctx) {
+    http_event_t event = {};
+    int fd = (int)ctx->rdi;
+    void *buf = (void *)ctx->rsi;
+    size_t len = (size_t)ctx->rdx;
+
+    // Only trace socket writes
+    if (fd < 3) { // Skip stdin, stdout, stderr
+        return 0;
+    }
+
+    // Get process and thread IDs
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.tid = (__u32)bpf_get_current_pid_tgid();
+    event.timestamp = bpf_ktime_get_ns();
+    event.type = EVENT_TYPE_SOCKET_WRITE;
+    event.conn_id = fd;
+
+    // Log debug information
+    bpf_printk("Socket write: pid=%d", event.pid);
+    bpf_printk("Socket write: fd=%d", fd);
+    bpf_printk("Socket write: len=%d", len);
+
+    // Copy data if buffer is valid
+    if (buf != NULL) {
+        event.data_len = len;
+        if (safe_read_user(event.data, len, buf) < 0) {
+            event.data_len = 0;
+            bpf_printk("Socket write: failed to read data");
+        } else {
+            bpf_printk("Socket write: read %d bytes", event.data_len);
+        }
+    } else {
+        bpf_printk("Socket write: invalid buffer");
     }
 
     // Send event to userspace
