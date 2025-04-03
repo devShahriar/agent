@@ -7,6 +7,9 @@
 #include <linux/bpf.h>
 #include <linux/ptrace.h>
 #include <linux/types.h>
+#include <linux/socket.h>
+#include <linux/uio.h>
+#include <linux/net.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
@@ -19,6 +22,22 @@
 
 // Maximum size for our data buffer - must be power of 2
 #define MAX_MSG_SIZE 256
+
+// Define iovec and msghdr structures since we can't use the kernel ones directly
+struct iovec {
+    void *iov_base;
+    size_t iov_len;
+};
+
+struct msghdr {
+    void *msg_name;
+    int msg_namelen;
+    struct iovec *msg_iov;
+    size_t msg_iovlen;
+    void *msg_control;
+    size_t msg_controllen;
+    unsigned int msg_flags;
+};
 
 // Process info structure
 struct process_info {
@@ -284,7 +303,8 @@ SEC("kprobe/tcp_recvmsg")
 int trace_tcp_recv(struct pt_regs *ctx) {
     http_event_t event = {};
     struct sock *sk = (struct sock *)ctx->rdi;
-    struct msghdr *msg = (struct msghdr *)ctx->rsi;
+    void *buf = (void *)ctx->rsi;
+    size_t len = (size_t)ctx->rdx;
     
     // Get process info
     event.pid = bpf_get_current_pid_tgid() >> 32;
@@ -293,65 +313,40 @@ int trace_tcp_recv(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SOCKET_READ;
     event.conn_id = (__u32)(unsigned long)sk;
 
-    // Get process name
+    // Get process name for debugging
     char comm[16];
     bpf_get_current_comm(&comm, sizeof(comm));
     
     // Debug log
-    bpf_printk("TCP recv from %s (pid=%d)", comm, event.pid);
-
-    if (!msg) {
-        bpf_printk("TCP recv: msg is NULL");
-        return 0;
-    }
-
-    // Read msg_iter
-    struct iovec *iov;
-    size_t iovlen;
-    if (bpf_probe_read_kernel(&iov, sizeof(iov), &msg->msg_iov) < 0 ||
-        bpf_probe_read_kernel(&iovlen, sizeof(iovlen), &msg->msg_iovlen) < 0) {
-        bpf_printk("TCP recv: failed to read msg_iter");
-        return 0;
-    }
-
-    if (!iov || iovlen == 0) {
-        bpf_printk("TCP recv: invalid iovec");
-        return 0;
-    }
-
-    // Read the first iovec
-    struct iovec first_iov;
-    if (bpf_probe_read_kernel(&first_iov, sizeof(first_iov), iov) < 0) {
-        bpf_printk("TCP recv: failed to read first iovec");
-        return 0;
-    }
-
-    void *buf = first_iov.iov_base;
-    size_t len = first_iov.iov_len;
-
-    bpf_printk("TCP recv: buf=%p len=%d", buf, len);
-
-    if (!buf || len == 0) {
-        bpf_printk("TCP recv: invalid buffer");
-        return 0;
-    }
-
-    // Cap the length
-    if (len > MAX_MSG_SIZE) {
-        len = MAX_MSG_SIZE;
-    }
-    event.data_len = len;
+    bpf_printk("TCP recv from %s (pid=%d len=%d)", comm, event.pid, len);
 
     // Try to read the data
-    if (bpf_probe_read_user(event.data, len, buf) < 0) {
-        bpf_printk("TCP recv: failed to read user buffer");
-        return 0;
-    }
+    if (buf != NULL && len > 0) {
+        // Cap the length
+        if (len > MAX_MSG_SIZE) {
+            len = MAX_MSG_SIZE;
+        }
+        event.data_len = len;
 
-    // Check if it's HTTP
-    if (is_http_data(event.data, event.data_len)) {
-        bpf_printk("TCP recv: sending HTTP event from %s", comm);
-        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+        // Try to read the data (try both kernel and user space)
+        if (bpf_probe_read_kernel(event.data, len, buf) < 0) {
+            if (bpf_probe_read_user(event.data, len, buf) < 0) {
+                bpf_printk("TCP recv: failed to read buffer");
+                return 0;
+            }
+        }
+
+        // Log the first few bytes for debugging
+        if (len >= 4) {
+            bpf_printk("TCP recv data: %c%c%c%c", 
+                event.data[0], event.data[1], event.data[2], event.data[3]);
+        }
+
+        // Check if it's HTTP
+        if (is_http_data(event.data, event.data_len)) {
+            bpf_printk("TCP recv: sending HTTP event from %s", comm);
+            bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+        }
     }
 
     return 0;
@@ -362,7 +357,8 @@ SEC("kprobe/tcp_sendmsg")
 int trace_tcp_send(struct pt_regs *ctx) {
     http_event_t event = {};
     struct sock *sk = (struct sock *)ctx->rdi;
-    struct msghdr *msg = (struct msghdr *)ctx->rsi;
+    void *buf = (void *)ctx->rsi;
+    size_t len = (size_t)ctx->rdx;
     
     // Get process info
     event.pid = bpf_get_current_pid_tgid() >> 32;
@@ -371,65 +367,40 @@ int trace_tcp_send(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SOCKET_WRITE;
     event.conn_id = (__u32)(unsigned long)sk;
 
-    // Get process name
+    // Get process name for debugging
     char comm[16];
     bpf_get_current_comm(&comm, sizeof(comm));
     
     // Debug log
-    bpf_printk("TCP send from %s (pid=%d)", comm, event.pid);
-
-    if (!msg) {
-        bpf_printk("TCP send: msg is NULL");
-        return 0;
-    }
-
-    // Read msg_iter
-    struct iovec *iov;
-    size_t iovlen;
-    if (bpf_probe_read_kernel(&iov, sizeof(iov), &msg->msg_iov) < 0 ||
-        bpf_probe_read_kernel(&iovlen, sizeof(iovlen), &msg->msg_iovlen) < 0) {
-        bpf_printk("TCP send: failed to read msg_iter");
-        return 0;
-    }
-
-    if (!iov || iovlen == 0) {
-        bpf_printk("TCP send: invalid iovec");
-        return 0;
-    }
-
-    // Read the first iovec
-    struct iovec first_iov;
-    if (bpf_probe_read_kernel(&first_iov, sizeof(first_iov), iov) < 0) {
-        bpf_printk("TCP send: failed to read first iovec");
-        return 0;
-    }
-
-    void *buf = first_iov.iov_base;
-    size_t len = first_iov.iov_len;
-
-    bpf_printk("TCP send: buf=%p len=%d", buf, len);
-
-    if (!buf || len == 0) {
-        bpf_printk("TCP send: invalid buffer");
-        return 0;
-    }
-
-    // Cap the length
-    if (len > MAX_MSG_SIZE) {
-        len = MAX_MSG_SIZE;
-    }
-    event.data_len = len;
+    bpf_printk("TCP send from %s (pid=%d len=%d)", comm, event.pid, len);
 
     // Try to read the data
-    if (bpf_probe_read_user(event.data, len, buf) < 0) {
-        bpf_printk("TCP send: failed to read user buffer");
-        return 0;
-    }
+    if (buf != NULL && len > 0) {
+        // Cap the length
+        if (len > MAX_MSG_SIZE) {
+            len = MAX_MSG_SIZE;
+        }
+        event.data_len = len;
 
-    // Check if it's HTTP
-    if (is_http_data(event.data, event.data_len)) {
-        bpf_printk("TCP send: sending HTTP event from %s", comm);
-        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+        // Try to read the data (try both kernel and user space)
+        if (bpf_probe_read_kernel(event.data, len, buf) < 0) {
+            if (bpf_probe_read_user(event.data, len, buf) < 0) {
+                bpf_printk("TCP send: failed to read buffer");
+                return 0;
+            }
+        }
+
+        // Log the first few bytes for debugging
+        if (len >= 4) {
+            bpf_printk("TCP send data: %c%c%c%c", 
+                event.data[0], event.data[1], event.data[2], event.data[3]);
+        }
+
+        // Check if it's HTTP
+        if (is_http_data(event.data, event.data_len)) {
+            bpf_printk("TCP send: sending HTTP event from %s", comm);
+            bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+        }
     }
 
     return 0;
