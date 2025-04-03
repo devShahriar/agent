@@ -96,6 +96,16 @@ static __always_inline int safe_read_user(void *dst, unsigned int size, const vo
     return bpf_probe_read_user(dst, size, src);
 }
 
+// Helper function to safely read kernel data
+static __always_inline int safe_read_kernel(void *dst, unsigned int size, const void *src) {
+    // Ensure size is within bounds using bitwise AND
+    size &= (MAX_MSG_SIZE - 1);
+    if (size == 0) {
+        return -1;
+    }
+    return bpf_probe_read_kernel(dst, size, src);
+}
+
 // Helper function to check if data looks like HTTP
 static __always_inline int is_http_data(const char *data, size_t len) {
     if (len < 3) {
@@ -216,8 +226,8 @@ int trace_tcp_recv(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SOCKET_READ;
     event.conn_id = (__u32)(unsigned long)sk;
 
-    // Log debug information
-    bpf_printk("TCP recv: pid=%d sk=%p len=%d", event.pid, sk, len);
+    // Always log basic info for debugging
+    bpf_printk("TCP recv: pid=%d tid=%d sk=%p len=%d", event.pid, event.tid, sk, len);
 
     // Copy data if buffer is valid
     if (buf != NULL) {
@@ -226,16 +236,36 @@ int trace_tcp_recv(struct pt_regs *ctx) {
             len = MAX_MSG_SIZE;
         }
         event.data_len = len;
-        if (safe_read_user(event.data, len, buf) < 0) {
-            event.data_len = 0;
-            bpf_printk("TCP recv: failed to read data");
+
+        // Try to read the data from kernel memory
+        if (safe_read_kernel(event.data, len, buf) < 0) {
+            bpf_printk("TCP recv: failed to read kernel data");
+            // Fallback to user memory read
+            if (safe_read_user(event.data, len, buf) < 0) {
+                event.data_len = 0;
+                bpf_printk("TCP recv: failed to read user data");
+            } else {
+                bpf_printk("TCP recv: successfully read user data");
+            }
         } else {
-            // Check if this looks like HTTP traffic
+            bpf_printk("TCP recv: successfully read kernel data");
+        }
+
+        // If we have data, check if it's HTTP
+        if (event.data_len > 0) {
+            // Log first few bytes for debugging
+            bpf_printk("TCP recv: first bytes: %c%c%c%c", 
+                event.data[0], event.data[1], event.data[2], event.data[3]);
+
             if (is_http_data(event.data, event.data_len)) {
                 bpf_printk("TCP recv: HTTP traffic detected, sending event");
                 bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            } else {
+                bpf_printk("TCP recv: not HTTP traffic");
             }
         }
+    } else {
+        bpf_printk("TCP recv: buffer is NULL");
     }
 
     return 0;
@@ -256,8 +286,8 @@ int trace_tcp_send(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SOCKET_WRITE;
     event.conn_id = (__u32)(unsigned long)sk;
 
-    // Log debug information
-    bpf_printk("TCP send: pid=%d sk=%p len=%d", event.pid, sk, len);
+    // Always log basic info for debugging
+    bpf_printk("TCP send: pid=%d tid=%d sk=%p len=%d", event.pid, event.tid, sk, len);
 
     // Copy data if buffer is valid
     if (buf != NULL) {
@@ -266,16 +296,36 @@ int trace_tcp_send(struct pt_regs *ctx) {
             len = MAX_MSG_SIZE;
         }
         event.data_len = len;
-        if (safe_read_user(event.data, len, buf) < 0) {
-            event.data_len = 0;
-            bpf_printk("TCP send: failed to read data");
+
+        // Try to read the data from kernel memory
+        if (safe_read_kernel(event.data, len, buf) < 0) {
+            bpf_printk("TCP send: failed to read kernel data");
+            // Fallback to user memory read
+            if (safe_read_user(event.data, len, buf) < 0) {
+                event.data_len = 0;
+                bpf_printk("TCP send: failed to read user data");
+            } else {
+                bpf_printk("TCP send: successfully read user data");
+            }
         } else {
-            // Check if this looks like HTTP traffic
+            bpf_printk("TCP send: successfully read kernel data");
+        }
+
+        // If we have data, check if it's HTTP
+        if (event.data_len > 0) {
+            // Log first few bytes for debugging
+            bpf_printk("TCP send: first bytes: %c%c%c%c", 
+                event.data[0], event.data[1], event.data[2], event.data[3]);
+
             if (is_http_data(event.data, event.data_len)) {
                 bpf_printk("TCP send: HTTP traffic detected, sending event");
                 bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            } else {
+                bpf_printk("TCP send: not HTTP traffic");
             }
         }
+    } else {
+        bpf_printk("TCP send: buffer is NULL");
     }
 
     return 0;
