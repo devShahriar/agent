@@ -20,87 +20,84 @@
 // Maximum size for our data buffer - must be power of 2
 #define MAX_MSG_SIZE 256
 
-// Export the typedef as a global declaration so bpf2go can find it
-struct http_event_t {
-    __u32 pid;          // Process ID
-    __u32 tid;          // Thread ID
-    __u64 timestamp;    // Event timestamp
-    __u8 type;          // Event type (read/write)
-    __u32 data_len;     // Length of the actual data
-    __u32 conn_id;      // Connection ID to correlate request/response
-    char data[MAX_MSG_SIZE]; // Actual HTTP data
-} __attribute__((packed));
+// Event structure to pass data to userspace
+typedef struct {
+    __u32 pid;
+    __u32 tid;
+    __u64 timestamp;
+    __u8 type;
+    __u32 data_len;
+    __u32 conn_id;
+    char data[MAX_MSG_SIZE];
+} __attribute__((packed)) http_event_t;
 
-typedef struct http_event_t http_event_t;
+// Map to store events
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
+} events SEC(".maps");
 
-// Define our own parameter access macros for x86_64
-#define PT_REGS_PARAM1(x) ((x)->rdi)
-#define PT_REGS_PARAM2(x) ((x)->rsi)
-#define PT_REGS_PARAM3(x) ((x)->rdx)
+// Helper function to get function parameters
+#define PARAM1(ctx) ((void *)PT_REGS_PARM1(ctx))
+#define PARAM2(ctx) ((void *)PT_REGS_PARM2(ctx))
+#define PARAM3(ctx) ((void *)PT_REGS_PARM3(ctx))
 
 // Event types
 #define EVENT_TYPE_SSL_READ  1
 #define EVENT_TYPE_SSL_WRITE 2
 
-// Perf event map for sending events to userspace
-struct {
-    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-    __uint(key_size, sizeof(int));
-    __uint(value_size, 4);  // Must be 0 or 4 for perf event array
-    __uint(max_entries, 1024);
-} events SEC(".maps");
+// Trace SSL_read
+SEC("uprobe/libssl.so.3:SSL_read")
+int trace_ssl_read(struct pt_regs *ctx) {
+    http_event_t event = {};
+    void *buf = PARAM2(ctx);
+    int len = (int)PT_REGS_PARM3(ctx);
 
-// Function to handle SSL events - simplified version
-static __always_inline
-int handle_ssl_event(struct pt_regs *ctx, void *ssl_ctx, void *buf, unsigned int count, __u8 event_type) {
-    // Quick bounds check
-    if (!buf || count == 0 || count > MAX_MSG_SIZE) {
-        return 0;
+    // Get process and thread IDs
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.tid = (__u32)bpf_get_current_pid_tgid();
+    event.timestamp = bpf_ktime_get_ns();
+    event.type = EVENT_TYPE_SSL_READ;
+    event.conn_id = (__u32)PT_REGS_PARM1(ctx);
+
+    // Copy data if it's not too large
+    if (len > 0 && len <= MAX_MSG_SIZE) {
+        event.data_len = len;
+        bpf_probe_read_user(event.data, len, buf);
     }
 
-    // Create event with minimal data
-    http_event_t event = {
-        .pid = bpf_get_current_pid_tgid() >> 32,
-        .tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF,
-        .timestamp = bpf_ktime_get_ns(),
-        .type = event_type,
-        .data_len = count
-    };
-    
-    // Set connection ID if available
-    if (ssl_ctx) {
-        event.conn_id = (__u32)(unsigned long)ssl_ctx;
-    }
-    
-    // Read data into event with fixed size to prevent verifier issues
-    if (bpf_probe_read_user(&event.data[0], MAX_MSG_SIZE, buf) == 0) {
-        // Send event to userspace
-        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
-    }
-    
+    // Send event to userspace
+    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     return 0;
 }
 
-// Simple SEC names for uprobe functions
-SEC("uprobe/libssl.so.3:SSL_read")
-int trace_ssl_read(struct pt_regs *ctx) {
-    void *ssl = (void *)PT_REGS_PARAM1(ctx);
-    void *buf = (void *)PT_REGS_PARAM2(ctx);
-    unsigned int num = (unsigned int)PT_REGS_PARAM3(ctx);
-    
-    return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_READ);
-}
-
+// Trace SSL_write
 SEC("uprobe/libssl.so.3:SSL_write")
 int trace_ssl_write(struct pt_regs *ctx) {
-    void *ssl = (void *)PT_REGS_PARAM1(ctx);
-    void *buf = (void *)PT_REGS_PARAM2(ctx);
-    unsigned int num = (unsigned int)PT_REGS_PARAM3(ctx);
-    
-    return handle_ssl_event(ctx, ssl, buf, num, EVENT_TYPE_SSL_WRITE);
+    http_event_t event = {};
+    void *buf = PARAM2(ctx);
+    int len = (int)PT_REGS_PARM3(ctx);
+
+    // Get process and thread IDs
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.tid = (__u32)bpf_get_current_pid_tgid();
+    event.timestamp = bpf_ktime_get_ns();
+    event.type = EVENT_TYPE_SSL_WRITE;
+    event.conn_id = (__u32)PT_REGS_PARM1(ctx);
+
+    // Copy data if it's not too large
+    if (len > 0 && len <= MAX_MSG_SIZE) {
+        event.data_len = len;
+        bpf_probe_read_user(event.data, len, buf);
+    }
+
+    // Send event to userspace
+    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+    return 0;
 }
 
 // Explicitly set program version to avoid vDSO lookup
 __u32 _version SEC("version") = 0xFFFFFFFE;
 
-char LICENSE[] SEC("license") = "Dual BSD/GPL";
+char _license[] SEC("license") = "GPL";

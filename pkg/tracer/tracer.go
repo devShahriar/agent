@@ -224,6 +224,10 @@ func (t *Tracer) Start() error {
 		return fmt.Errorf("finding SSL library: %w", err)
 	}
 
+	if t.logger != nil {
+		t.logger.WithField("ssl_path", sslPath).Info("Found SSL library")
+	}
+
 	// Open the SSL library
 	ex, err := link.OpenExecutable(sslPath)
 	if err != nil {
@@ -233,10 +237,14 @@ func (t *Tracer) Start() error {
 	// Load SSL programs manually to avoid vDSO issues
 	sslReadProg, sslWriteProg, err := loadSSLPrograms()
 	if err != nil {
-		// Fall back to the already loaded objects if manual loading fails
 		if t.logger != nil {
 			t.logger.WithError(err).
 				Warn("Manual program loading failed, falling back to preloaded programs")
+		}
+
+		// Fall back to the already loaded objects if manual loading fails
+		if t.objs == nil {
+			return fmt.Errorf("no BPF objects available: %w", err)
 		}
 
 		// Attach to SSL_read with retries using preloaded programs
@@ -244,12 +252,17 @@ func (t *Tracer) Start() error {
 			readUprobe, err := ex.Uprobe("SSL_read", t.objs.TraceSslRead, nil)
 			if err == nil {
 				t.uprobes = append(t.uprobes, readUprobe)
+				if t.logger != nil {
+					t.logger.Info("Successfully attached SSL_read uprobe")
+				}
 				break
 			}
 			if i == 2 {
 				return fmt.Errorf("attaching SSL_read uprobe: %w", err)
 			}
-			t.logger.WithError(err).Warn("Retrying SSL_read uprobe attachment")
+			if t.logger != nil {
+				t.logger.WithError(err).Warn("Retrying SSL_read uprobe attachment")
+			}
 		}
 
 		// Attach to SSL_write with retries using preloaded programs
@@ -257,12 +270,17 @@ func (t *Tracer) Start() error {
 			writeUprobe, err := ex.Uprobe("SSL_write", t.objs.TraceSslWrite, nil)
 			if err == nil {
 				t.uprobes = append(t.uprobes, writeUprobe)
+				if t.logger != nil {
+					t.logger.Info("Successfully attached SSL_write uprobe")
+				}
 				break
 			}
 			if i == 2 {
 				return fmt.Errorf("attaching SSL_write uprobe: %w", err)
 			}
-			t.logger.WithError(err).Warn("Retrying SSL_write uprobe attachment")
+			if t.logger != nil {
+				t.logger.WithError(err).Warn("Retrying SSL_write uprobe attachment")
+			}
 		}
 	} else {
 		// Use the manually loaded programs
@@ -275,12 +293,17 @@ func (t *Tracer) Start() error {
 			readUprobe, err := ex.Uprobe("SSL_read", sslReadProg, nil)
 			if err == nil {
 				t.uprobes = append(t.uprobes, readUprobe)
+				if t.logger != nil {
+					t.logger.Info("Successfully attached SSL_read uprobe")
+				}
 				break
 			}
 			if i == 2 {
 				return fmt.Errorf("attaching SSL_read uprobe: %w", err)
 			}
-			t.logger.WithError(err).Warn("Retrying SSL_read uprobe attachment")
+			if t.logger != nil {
+				t.logger.WithError(err).Warn("Retrying SSL_read uprobe attachment")
+			}
 		}
 
 		// Attach to SSL_write with retries
@@ -288,17 +311,26 @@ func (t *Tracer) Start() error {
 			writeUprobe, err := ex.Uprobe("SSL_write", sslWriteProg, nil)
 			if err == nil {
 				t.uprobes = append(t.uprobes, writeUprobe)
+				if t.logger != nil {
+					t.logger.Info("Successfully attached SSL_write uprobe")
+				}
 				break
 			}
 			if i == 2 {
 				return fmt.Errorf("attaching SSL_write uprobe: %w", err)
 			}
-			t.logger.WithError(err).Warn("Retrying SSL_write uprobe attachment")
+			if t.logger != nil {
+				t.logger.WithError(err).Warn("Retrying SSL_write uprobe attachment")
+			}
 		}
 	}
 
 	// Start polling for events
 	go t.pollEvents()
+
+	if t.logger != nil {
+		t.logger.Info("HTTP traffic tracer started successfully")
+	}
 
 	return nil
 }
@@ -396,6 +428,18 @@ func (t *Tracer) pollEvents() {
 			// Parse HTTP data
 			parseHTTPData(&event)
 
+			// Log the event details
+			if t.logger != nil {
+				t.logger.WithFields(logrus.Fields{
+					"pid":         event.PID,
+					"process":     event.ProcessName,
+					"type":        event.Type,
+					"method":      event.Method,
+					"url":         event.URL,
+					"status_code": event.StatusCode,
+				}).Info("Captured HTTP event")
+			}
+
 			// Track connections to correlate requests and responses
 			if event.Type == EventTypeSSLWrite {
 				// Save request for correlation with response
@@ -409,12 +453,13 @@ func (t *Tracer) pollEvents() {
 				t.connMu.RUnlock()
 
 				if exists {
-					// Can add correlation info here if needed
-					t.logger.WithFields(logrus.Fields{
-						"url":    reqEvent.URL,
-						"method": reqEvent.Method,
-						"status": event.StatusCode,
-					}).Debug("Correlated request-response")
+					if t.logger != nil {
+						t.logger.WithFields(logrus.Fields{
+							"url":    reqEvent.URL,
+							"method": reqEvent.Method,
+							"status": event.StatusCode,
+						}).Info("Correlated request-response")
+					}
 				}
 			}
 
