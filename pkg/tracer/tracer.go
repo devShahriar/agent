@@ -256,61 +256,42 @@ func loadSSLPrograms() (*ebpf.Program, *ebpf.Program, error) {
 
 // Start begins tracing HTTP traffic
 func (t *Tracer) Start() error {
-	if t.logger != nil {
-		t.logger.Info("Starting HTTP traffic tracer...")
-	}
+	t.logger.Info("Starting HTTP traffic tracer...")
 
 	// Find SSL library
 	sslPath, err := findSSLPath()
 	if err != nil {
-		if t.logger != nil {
-			t.logger.WithError(err).
-				Warn("Could not find SSL library, will only trace socket operations")
-		}
+		t.logger.WithError(err).
+			Warn("Could not find SSL library, will only trace socket operations")
 	} else {
-		if t.logger != nil {
-			t.logger.WithField("ssl_path", sslPath).Info("Found SSL library")
-		}
+		t.logger.WithField("ssl_path", sslPath).Info("Found SSL library")
 
 		// Open the SSL library
 		ex, err := link.OpenExecutable(sslPath)
 		if err != nil {
-			if t.logger != nil {
-				t.logger.WithError(err).Warn("Could not open SSL library, will only trace socket operations")
-			}
+			t.logger.WithError(err).Warn("Could not open SSL library, will only trace socket operations")
 		} else {
 			// Load SSL programs manually to avoid vDSO issues
 			readProg, writeProg, err := loadSSLPrograms()
 			if err != nil {
-				if t.logger != nil {
-					t.logger.WithError(err).
-						Warn("Manual program loading failed, falling back to preloaded programs")
-				}
+				t.logger.WithError(err).Warn("Manual program loading failed, falling back to preloaded programs")
 			} else {
 				// Attach to SSL_read
 				readUprobe, err := ex.Uprobe("SSL_read", readProg, nil)
 				if err != nil {
-					if t.logger != nil {
-						t.logger.WithError(err).Error("Failed to attach SSL_read uprobe")
-					}
+					t.logger.WithError(err).Error("Failed to attach SSL_read uprobe")
 				} else {
 					t.uprobes = append(t.uprobes, readUprobe)
-					if t.logger != nil {
-						t.logger.Info("Successfully attached SSL_read uprobe")
-					}
+					t.logger.Info("Successfully attached SSL_read uprobe")
 				}
 
 				// Attach to SSL_write
 				writeUprobe, err := ex.Uprobe("SSL_write", writeProg, nil)
 				if err != nil {
-					if t.logger != nil {
-						t.logger.WithError(err).Error("Failed to attach SSL_write uprobe")
-					}
+					t.logger.WithError(err).Error("Failed to attach SSL_write uprobe")
 				} else {
 					t.uprobes = append(t.uprobes, writeUprobe)
-					if t.logger != nil {
-						t.logger.Info("Successfully attached SSL_write uprobe")
-					}
+					t.logger.Info("Successfully attached SSL_write uprobe")
 				}
 			}
 		}
@@ -319,9 +300,8 @@ func (t *Tracer) Start() error {
 	// Start polling for events
 	go t.pollEvents()
 
-	if t.logger != nil {
-		t.logger.Info("HTTP traffic tracer started successfully")
-	}
+	t.logger.Info("HTTP traffic tracer started successfully")
+	t.logger.Info("Tracer is running. Press Ctrl+C to stop.")
 
 	return nil
 }
@@ -402,18 +382,14 @@ func (t *Tracer) pollEvents() {
 				if err == perf.ErrClosed {
 					return
 				}
-				if t.logger != nil {
-					t.logger.WithError(err).Error("Error reading from ring buffer")
-				}
+				t.logger.WithError(err).Error("Error reading from ring buffer")
 				continue
 			}
 
 			// Parse the event
 			var event HTTPEvent
 			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
-				if t.logger != nil {
-					t.logger.WithError(err).Error("Error parsing event")
-				}
+				t.logger.WithError(err).Error("Error parsing event")
 				continue
 			}
 
@@ -421,36 +397,30 @@ func (t *Tracer) pollEvents() {
 			switch event.Type {
 			case EventTypeSSLRead, EventTypeSocketRead:
 				// This is a response
-				if t.logger != nil {
-					t.logger.WithFields(logrus.Fields{
-						"type":     event.Type,
-						"pid":      event.PID,
-						"tid":      event.TID,
-						"data_len": event.DataLen,
-						"data":     string(event.Data[:event.DataLen]),
-					}).Info("Received response")
-				}
+				t.logger.WithFields(logrus.Fields{
+					"type":     event.Type,
+					"pid":      event.PID,
+					"tid":      event.TID,
+					"data_len": event.DataLen,
+					"data":     string(event.Data[:event.DataLen]),
+				}).Info("Received response")
 				if t.eventCallback != nil {
 					t.eventCallback(event)
 				}
 			case EventTypeSSLWrite, EventTypeSocketWrite:
 				// This is a request
-				if t.logger != nil {
-					t.logger.WithFields(logrus.Fields{
-						"type":     event.Type,
-						"pid":      event.PID,
-						"tid":      event.TID,
-						"data_len": event.DataLen,
-						"data":     string(event.Data[:event.DataLen]),
-					}).Info("Received request")
-				}
+				t.logger.WithFields(logrus.Fields{
+					"type":     event.Type,
+					"pid":      event.PID,
+					"tid":      event.TID,
+					"data_len": event.DataLen,
+					"data":     string(event.Data[:event.DataLen]),
+				}).Info("Received request")
 				if t.eventCallback != nil {
 					t.eventCallback(event)
 				}
 			default:
-				if t.logger != nil {
-					t.logger.WithField("type", event.Type).Warn("Unknown event type")
-				}
+				t.logger.WithField("type", event.Type).Warn("Unknown event type")
 			}
 		}
 	}

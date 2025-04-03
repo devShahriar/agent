@@ -390,6 +390,33 @@ int trace_sys_write(struct pt_regs *ctx) {
     return 0;
 }
 
+// Add new kprobes for socket operations
+SEC("kprobe/tcp_v4_connect")
+int trace_tcp_connect(struct pt_regs *ctx) {
+    struct sock *sk = (struct sock *)ctx->rdi;
+    struct sockaddr_in *addr = (struct sockaddr_in *)ctx->rsi;
+    http_event_t event = {};
+
+    // Get process and thread IDs
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.tid = (__u32)bpf_get_current_pid_tgid();
+    event.timestamp = bpf_ktime_get_ns();
+    event.type = EVENT_TYPE_SOCKET_WRITE;
+
+    // Log debug information
+    bpf_printk("tcp_v4_connect: pid=%d sk=%p", event.pid, sk);
+
+    // Update connection state
+    __u32 *state = bpf_map_lookup_elem(&conn_state, &event.conn_id);
+    if (!state) {
+        __u32 new_state = 1;
+        bpf_map_update_elem(&conn_state, &event.conn_id, &new_state, BPF_ANY);
+        bpf_printk("tcp_v4_connect: new connection state created");
+    }
+
+    return 0;
+}
+
 // Explicitly set program version to avoid vDSO lookup
 __u32 _version SEC("version") = 0xFFFFFFFE;
 
