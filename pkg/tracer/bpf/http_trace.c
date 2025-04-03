@@ -226,8 +226,9 @@ int trace_tcp_recv(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SOCKET_READ;
     event.conn_id = (__u32)(unsigned long)sk;
 
-    // Always log basic info for debugging
-    bpf_printk("TCP recv: pid=%d tid=%d sk=%p len=%d", event.pid, event.tid, sk, len);
+    // Split debug logging into multiple calls
+    bpf_printk("TCP recv: pid=%d tid=%d", event.pid, event.tid);
+    bpf_printk("TCP recv: sk=%p len=%d", sk, len);
 
     // Copy data if buffer is valid
     if (buf != NULL) {
@@ -253,9 +254,9 @@ int trace_tcp_recv(struct pt_regs *ctx) {
 
         // If we have data, check if it's HTTP
         if (event.data_len > 0) {
-            // Log first few bytes for debugging
-            bpf_printk("TCP recv: first bytes: %c%c%c%c", 
-                event.data[0], event.data[1], event.data[2], event.data[3]);
+            // Split first bytes logging into multiple calls
+            bpf_printk("TCP recv: first byte: %c", event.data[0]);
+            bpf_printk("TCP recv: next bytes: %c%c%c", event.data[1], event.data[2], event.data[3]);
 
             if (is_http_data(event.data, event.data_len)) {
                 bpf_printk("TCP recv: HTTP traffic detected, sending event");
@@ -286,8 +287,9 @@ int trace_tcp_send(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SOCKET_WRITE;
     event.conn_id = (__u32)(unsigned long)sk;
 
-    // Always log basic info for debugging
-    bpf_printk("TCP send: pid=%d tid=%d sk=%p len=%d", event.pid, event.tid, sk, len);
+    // Split debug logging into multiple calls
+    bpf_printk("TCP send: pid=%d tid=%d", event.pid, event.tid);
+    bpf_printk("TCP send: sk=%p len=%d", sk, len);
 
     // Copy data if buffer is valid
     if (buf != NULL) {
@@ -313,9 +315,9 @@ int trace_tcp_send(struct pt_regs *ctx) {
 
         // If we have data, check if it's HTTP
         if (event.data_len > 0) {
-            // Log first few bytes for debugging
-            bpf_printk("TCP send: first bytes: %c%c%c%c", 
-                event.data[0], event.data[1], event.data[2], event.data[3]);
+            // Split first bytes logging into multiple calls
+            bpf_printk("TCP send: first byte: %c", event.data[0]);
+            bpf_printk("TCP send: next bytes: %c%c%c", event.data[1], event.data[2], event.data[3]);
 
             if (is_http_data(event.data, event.data_len)) {
                 bpf_printk("TCP send: HTTP traffic detected, sending event");
