@@ -23,22 +23,6 @@
 // Maximum size for our data buffer - must be power of 2
 #define MAX_MSG_SIZE 256
 
-// Define iovec and msghdr structures since we can't use the kernel ones directly
-struct iovec {
-    void *iov_base;
-    size_t iov_len;
-};
-
-struct msghdr {
-    void *msg_name;
-    int msg_namelen;
-    struct iovec *msg_iov;
-    size_t msg_iovlen;
-    void *msg_control;
-    size_t msg_controllen;
-    unsigned int msg_flags;
-};
-
 // Process info structure
 struct process_info {
     __u32 pid;
