@@ -51,8 +51,8 @@ static __always_inline void *get_param2(struct pt_regs *ctx) {
     return (void *)ctx->rsi;
 }
 
-static __always_inline int get_param3(struct pt_regs *ctx) {
-    return (int)ctx->rdx;
+static __always_inline unsigned int get_param3(struct pt_regs *ctx) {
+    return (unsigned int)ctx->rdx;
 }
 
 // Trace SSL_read
@@ -60,7 +60,7 @@ SEC("uprobe/libssl.so.3:SSL_read")
 int trace_ssl_read(struct pt_regs *ctx) {
     http_event_t event = {};
     void *buf = get_param2(ctx);
-    int len = get_param3(ctx);
+    unsigned int len = get_param3(ctx);
 
     // Get process and thread IDs
     event.pid = bpf_get_current_pid_tgid() >> 32;
@@ -85,7 +85,7 @@ SEC("uprobe/libssl.so.3:SSL_write")
 int trace_ssl_write(struct pt_regs *ctx) {
     http_event_t event = {};
     void *buf = get_param2(ctx);
-    int len = get_param3(ctx);
+    unsigned int len = get_param3(ctx);
 
     // Get process and thread IDs
     event.pid = bpf_get_current_pid_tgid() >> 32;
