@@ -24,6 +24,13 @@ const (
 	EventTypeSocketWrite = 4 // Request
 )
 
+// ProcessInfo represents process information
+type ProcessInfo struct {
+	PID  uint32
+	PPID uint32
+	Comm string
+}
+
 // HTTPEvent represents a captured HTTP event
 type HTTPEvent struct {
 	PID       uint32

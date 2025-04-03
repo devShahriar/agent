@@ -20,6 +20,13 @@
 // Maximum size for our data buffer - must be power of 2
 #define MAX_MSG_SIZE 256
 
+// Process info structure
+struct process_info {
+    __u32 pid;
+    __u32 ppid;
+    char comm[16];
+} __attribute__((packed));
+
 // Event structure to pass data to userspace
 typedef struct {
     __u32 pid;
