@@ -79,12 +79,21 @@ int trace_ssl_read(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SSL_READ;
     event.conn_id = (__u32)(unsigned long)get_param1(ctx);
 
+    // Log debug information
+    bpf_printk("SSL_read: pid=%d tid=%d len=%d buf=%p", 
+               event.pid, event.tid, len, buf);
+
     // Copy data if buffer is valid
     if (buf != NULL) {
         event.data_len = len;
         if (safe_read_user(event.data, len, buf) < 0) {
             event.data_len = 0;
+            bpf_printk("SSL_read: failed to read data");
+        } else {
+            bpf_printk("SSL_read: successfully read %d bytes", event.data_len);
         }
+    } else {
+        bpf_printk("SSL_read: invalid buffer");
     }
 
     // Send event to userspace
@@ -106,12 +115,21 @@ int trace_ssl_write(struct pt_regs *ctx) {
     event.type = EVENT_TYPE_SSL_WRITE;
     event.conn_id = (__u32)(unsigned long)get_param1(ctx);
 
+    // Log debug information
+    bpf_printk("SSL_write: pid=%d tid=%d len=%d buf=%p", 
+               event.pid, event.tid, len, buf);
+
     // Copy data if buffer is valid
     if (buf != NULL) {
         event.data_len = len;
         if (safe_read_user(event.data, len, buf) < 0) {
             event.data_len = 0;
+            bpf_printk("SSL_write: failed to read data");
+        } else {
+            bpf_printk("SSL_write: successfully read %d bytes", event.data_len);
         }
+    } else {
+        bpf_printk("SSL_write: invalid buffer");
     }
 
     // Send event to userspace
