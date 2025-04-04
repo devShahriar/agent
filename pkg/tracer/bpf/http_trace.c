@@ -72,7 +72,7 @@ struct {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(bool));
+    __uint(value_size, sizeof(_Bool));
     __uint(max_entries, 1024);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } active_fds SEC(".maps") = {};
@@ -187,7 +187,7 @@ int trace_accept4(struct pt_regs *ctx) {
     bpf_printk("accept4 from %s (pid=%d sockfd=%d)", comm, event.pid, sockfd);
 
     // Store the file descriptor as active
-    bool t = true;
+    _Bool t = 1;
     bpf_map_update_elem(&active_fds, &sockfd, &t, BPF_ANY);
 
     return 0;
@@ -202,7 +202,7 @@ int trace_write(struct pt_regs *ctx) {
     size_t len = (size_t)ctx->rdx;
     
     // Check if this is an active file descriptor
-    bool *is_active = bpf_map_lookup_elem(&active_fds, &fd);
+    _Bool *is_active = bpf_map_lookup_elem(&active_fds, &fd);
     if (!is_active) {
         return 0;
     }
@@ -258,7 +258,7 @@ int trace_close(struct pt_regs *ctx) {
     int fd = (int)ctx->rdi;
     
     // Check if this is an active file descriptor
-    bool *is_active = bpf_map_lookup_elem(&active_fds, &fd);
+    _Bool *is_active = bpf_map_lookup_elem(&active_fds, &fd);
     if (!is_active) {
         return 0;
     }
