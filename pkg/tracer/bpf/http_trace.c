@@ -85,29 +85,6 @@ struct {
 #define EVENT_TYPE_CONNECT 5
 #define EVENT_TYPE_CLOSE 6
 
-// Helper function to get function parameters
-static __always_inline void *get_param1(struct pt_regs *ctx) {
-    return (void *)ctx->rdi;
-}
-
-static __always_inline void *get_param2(struct pt_regs *ctx) {
-    return (void *)ctx->rsi;
-}
-
-static __always_inline unsigned int get_param3(struct pt_regs *ctx) {
-    return (unsigned int)ctx->rdx;
-}
-
-// Helper function to safely read user data
-static __always_inline int safe_read_user(void *dst, unsigned int size, const void *src) {
-    // Ensure size is within bounds using bitwise AND
-    size &= (MAX_MSG_SIZE - 1);
-    if (size == 0) {
-        return -1;
-    }
-    return bpf_probe_read_user(dst, size, src);
-}
-
 // Helper function to check if data looks like HTTP
 static __always_inline int is_http_data(const char *data, size_t len) {
     if (len < 4) {
@@ -243,6 +220,65 @@ int trace_write(struct pt_regs *ctx) {
         // Check if it's HTTP
         if (is_http_data(event.data, event.data_len)) {
             bpf_printk("write: sending HTTP event from %s", comm);
+            bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+        }
+    }
+
+    return 0;
+}
+
+// Trace read syscall
+SEC("kprobe/sys_read")
+int trace_read(struct pt_regs *ctx) {
+    http_event_t event = {};
+    int fd = (int)ctx->rdi;
+    void *buf = (void *)ctx->rsi;
+    size_t len = (size_t)ctx->rdx;
+    
+    // Check if this is an active file descriptor
+    _Bool *is_active = bpf_map_lookup_elem(&active_fds, &fd);
+    if (!is_active) {
+        return 0;
+    }
+    
+    // Get process info
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.tid = (__u32)bpf_get_current_pid_tgid();
+    event.timestamp = bpf_ktime_get_ns();
+    event.type = EVENT_TYPE_SOCKET_READ;
+    event.conn_id = fd;
+
+    // Get process name for debugging
+    char comm[16];
+    bpf_get_current_comm(&comm, sizeof(comm));
+    
+    // Debug log
+    bpf_printk("read from %s (pid=%d fd=%d len=%d)", comm, event.pid, fd, len);
+
+    // Try to read the data
+    if (buf != NULL && len > 0) {
+        // Cap the length
+        if (len > MAX_MSG_SIZE) {
+            len = MAX_MSG_SIZE;
+        }
+        event.data_len = len;
+
+        // Try to read the data
+        if (bpf_probe_read_user(event.data, len, buf) < 0) {
+            bpf_printk("read: failed to read buffer");
+            return 0;
+        }
+
+        // Log the first few bytes for debugging
+        if (len >= 4) {
+            // Split the logging into two calls
+            bpf_printk("read data (1/2): %c%c", event.data[0], event.data[1]);
+            bpf_printk("read data (2/2): %c%c", event.data[2], event.data[3]);
+        }
+
+        // Check if it's HTTP
+        if (is_http_data(event.data, event.data_len)) {
+            bpf_printk("read: sending HTTP event from %s", comm);
             bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
         }
     }
