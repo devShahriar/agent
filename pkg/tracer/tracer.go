@@ -471,33 +471,33 @@ func (t *Tracer) Start() error {
 		}
 	}
 
-	// Attach TCP kprobes
+	// Attach syscall probes
 	if t.objs != nil {
-		// Attach tcp_recvmsg kprobe
-		kp, err := link.Kprobe("tcp_recvmsg", t.objs.TraceTcpRecv, nil)
+		// Attach accept4 kprobe
+		kp, err := link.Kprobe("sys_accept4", t.objs.TraceAccept4, nil)
 		if err != nil {
-			t.logger.WithError(err).Error("Failed to attach tcp_recvmsg kprobe")
+			t.logger.WithError(err).Error("Failed to attach sys_accept4 kprobe")
 		} else {
 			t.uprobes = append(t.uprobes, kp)
-			t.logger.Info("Successfully attached tcp_recvmsg kprobe")
+			t.logger.Info("Successfully attached sys_accept4 kprobe")
 		}
 
-		// Attach tcp_sendmsg kprobe
-		kp, err = link.Kprobe("tcp_sendmsg", t.objs.TraceTcpSend, nil)
+		// Attach write kprobe
+		kp, err = link.Kprobe("sys_write", t.objs.TraceWrite, nil)
 		if err != nil {
-			t.logger.WithError(err).Error("Failed to attach tcp_sendmsg kprobe")
+			t.logger.WithError(err).Error("Failed to attach sys_write kprobe")
 		} else {
 			t.uprobes = append(t.uprobes, kp)
-			t.logger.Info("Successfully attached tcp_sendmsg kprobe")
+			t.logger.Info("Successfully attached sys_write kprobe")
 		}
 
-		// Attach tcp_v4_connect kprobe
-		kp, err = link.Kprobe("tcp_v4_connect", t.objs.TraceTcpConnect, nil)
+		// Attach close kprobe
+		kp, err = link.Kprobe("sys_close", t.objs.TraceClose, nil)
 		if err != nil {
-			t.logger.WithError(err).Error("Failed to attach tcp_v4_connect kprobe")
+			t.logger.WithError(err).Error("Failed to attach sys_close kprobe")
 		} else {
 			t.uprobes = append(t.uprobes, kp)
-			t.logger.Info("Successfully attached tcp_v4_connect kprobe")
+			t.logger.Info("Successfully attached sys_close kprobe")
 		}
 	} else {
 		t.logger.Error("BPF objects not loaded, cannot attach kprobes")

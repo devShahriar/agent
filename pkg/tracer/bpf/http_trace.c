@@ -21,7 +21,7 @@
 #endif
 
 // Maximum size for our data buffer - must be power of 2
-#define MAX_MSG_SIZE 256
+#define MAX_MSG_SIZE 1024
 
 // Process info structure
 struct process_info {
@@ -68,11 +68,22 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } process_info SEC(".maps") = {};
 
+// Map to store active file descriptors
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(bool));
+    __uint(max_entries, 1024);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} active_fds SEC(".maps") = {};
+
 // Event types
 #define EVENT_TYPE_SSL_READ  1
 #define EVENT_TYPE_SSL_WRITE 2
 #define EVENT_TYPE_SOCKET_READ  3
 #define EVENT_TYPE_SOCKET_WRITE 4
+#define EVENT_TYPE_CONNECT 5
+#define EVENT_TYPE_CLOSE 6
 
 // Helper function to get function parameters
 static __always_inline void *get_param1(struct pt_regs *ctx) {
@@ -153,107 +164,62 @@ static __always_inline int is_http_data(const char *data, size_t len) {
     return 0;
 }
 
-// Trace SSL_read
-SEC("uprobe/libssl.so.3:SSL_read")
-int trace_ssl_read(struct pt_regs *ctx) {
+// Trace accept4 syscall
+SEC("kprobe/sys_accept4")
+int trace_accept4(struct pt_regs *ctx) {
     http_event_t event = {};
-    void *buf = get_param2(ctx);
-    unsigned int len = get_param3(ctx);
-
-    // Get process and thread IDs
-    event.pid = bpf_get_current_pid_tgid() >> 32;
-    event.tid = (__u32)bpf_get_current_pid_tgid();
-    event.timestamp = bpf_ktime_get_ns();
-    event.type = EVENT_TYPE_SSL_READ;
-    event.conn_id = (__u32)(unsigned long)get_param1(ctx);
-
-    // Log debug information
-    bpf_printk("SSL_read: pid=%d", event.pid);
-    bpf_printk("SSL_read: tid=%d", event.tid);
-    bpf_printk("SSL_read: len=%d", len);
-    bpf_printk("SSL_read: buf=%p", buf);
-
-    // Copy data if buffer is valid
-    if (buf != NULL) {
-        event.data_len = len;
-        if (safe_read_user(event.data, len, buf) < 0) {
-            event.data_len = 0;
-            bpf_printk("SSL_read: failed to read data");
-        } else {
-            // Check if this looks like HTTP traffic
-            if (is_http_data(event.data, event.data_len)) {
-                bpf_printk("SSL_read: HTTP traffic detected");
-                bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
-            }
-        }
-    } else {
-        bpf_printk("SSL_read: invalid buffer");
-    }
-
-    return 0;
-}
-
-// Trace SSL_write
-SEC("uprobe/libssl.so.3:SSL_write")
-int trace_ssl_write(struct pt_regs *ctx) {
-    http_event_t event = {};
-    void *buf = get_param2(ctx);
-    unsigned int len = get_param3(ctx);
-
-    // Get process and thread IDs
-    event.pid = bpf_get_current_pid_tgid() >> 32;
-    event.tid = (__u32)bpf_get_current_pid_tgid();
-    event.timestamp = bpf_ktime_get_ns();
-    event.type = EVENT_TYPE_SSL_WRITE;
-    event.conn_id = (__u32)(unsigned long)get_param1(ctx);
-
-    // Log debug information
-    bpf_printk("SSL_write: pid=%d", event.pid);
-    bpf_printk("SSL_write: tid=%d", event.tid);
-    bpf_printk("SSL_write: len=%d", len);
-    bpf_printk("SSL_write: buf=%p", buf);
-
-    // Copy data if buffer is valid
-    if (buf != NULL) {
-        event.data_len = len;
-        if (safe_read_user(event.data, len, buf) < 0) {
-            event.data_len = 0;
-            bpf_printk("SSL_write: failed to read data");
-        } else {
-            // Check if this looks like HTTP traffic
-            if (is_http_data(event.data, event.data_len)) {
-                bpf_printk("SSL_write: HTTP traffic detected");
-                bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
-            }
-        }
-    } else {
-        bpf_printk("SSL_write: invalid buffer");
-    }
-
-    return 0;
-}
-
-// Trace TCP receive
-SEC("kprobe/tcp_recvmsg")
-int trace_tcp_recv(struct pt_regs *ctx) {
-    http_event_t event = {};
-    struct sock *sk = (struct sock *)ctx->rdi;
-    void *buf = (void *)ctx->rsi;
-    size_t len = (size_t)ctx->rdx;
+    int sockfd = (int)ctx->rdi;
+    struct sockaddr *addr = (struct sockaddr *)ctx->rsi;
+    size_t *addrlen = (size_t *)ctx->rdx;
     
     // Get process info
     event.pid = bpf_get_current_pid_tgid() >> 32;
     event.tid = (__u32)bpf_get_current_pid_tgid();
     event.timestamp = bpf_ktime_get_ns();
-    event.type = EVENT_TYPE_SOCKET_READ;
-    event.conn_id = (__u32)(unsigned long)sk;
+    event.type = EVENT_TYPE_CONNECT;
+    event.conn_id = sockfd;
 
     // Get process name for debugging
     char comm[16];
     bpf_get_current_comm(&comm, sizeof(comm));
     
     // Debug log
-    bpf_printk("TCP recv from %s (pid=%d len=%d)", comm, event.pid, len);
+    bpf_printk("accept4 from %s (pid=%d sockfd=%d)", comm, event.pid, sockfd);
+
+    // Store the file descriptor as active
+    bool t = true;
+    bpf_map_update_elem(&active_fds, &sockfd, &t, BPF_ANY);
+
+    return 0;
+}
+
+// Trace write syscall
+SEC("kprobe/sys_write")
+int trace_write(struct pt_regs *ctx) {
+    http_event_t event = {};
+    int fd = (int)ctx->rdi;
+    void *buf = (void *)ctx->rsi;
+    size_t len = (size_t)ctx->rdx;
+    
+    // Check if this is an active file descriptor
+    bool *is_active = bpf_map_lookup_elem(&active_fds, &fd);
+    if (!is_active) {
+        return 0;
+    }
+    
+    // Get process info
+    event.pid = bpf_get_current_pid_tgid() >> 32;
+    event.tid = (__u32)bpf_get_current_pid_tgid();
+    event.timestamp = bpf_ktime_get_ns();
+    event.type = EVENT_TYPE_SOCKET_WRITE;
+    event.conn_id = fd;
+
+    // Get process name for debugging
+    char comm[16];
+    bpf_get_current_comm(&comm, sizeof(comm));
+    
+    // Debug log
+    bpf_printk("write from %s (pid=%d fd=%d len=%d)", comm, event.pid, fd, len);
 
     // Try to read the data
     if (buf != NULL && len > 0) {
@@ -265,20 +231,20 @@ int trace_tcp_recv(struct pt_regs *ctx) {
 
         // Try to read the data
         if (bpf_probe_read_user(event.data, len, buf) < 0) {
-            bpf_printk("TCP recv: failed to read buffer");
+            bpf_printk("write: failed to read buffer");
             return 0;
         }
 
         // Log the first few bytes for debugging
         if (len >= 4) {
             // Split the logging into two calls
-            bpf_printk("TCP recv data (1/2): %c%c", event.data[0], event.data[1]);
-            bpf_printk("TCP recv data (2/2): %c%c", event.data[2], event.data[3]);
+            bpf_printk("write data (1/2): %c%c", event.data[0], event.data[1]);
+            bpf_printk("write data (2/2): %c%c", event.data[2], event.data[3]);
         }
 
         // Check if it's HTTP
         if (is_http_data(event.data, event.data_len)) {
-            bpf_printk("TCP recv: sending HTTP event from %s", comm);
+            bpf_printk("write: sending HTTP event from %s", comm);
             bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
         }
     }
@@ -286,83 +252,26 @@ int trace_tcp_recv(struct pt_regs *ctx) {
     return 0;
 }
 
-// Trace TCP send
-SEC("kprobe/tcp_sendmsg")
-int trace_tcp_send(struct pt_regs *ctx) {
-    http_event_t event = {};
-    struct sock *sk = (struct sock *)ctx->rdi;
-    void *buf = (void *)ctx->rsi;
-    size_t len = (size_t)ctx->rdx;
+// Trace close syscall
+SEC("kprobe/sys_close")
+int trace_close(struct pt_regs *ctx) {
+    int fd = (int)ctx->rdi;
     
-    // Get process info
-    event.pid = bpf_get_current_pid_tgid() >> 32;
-    event.tid = (__u32)bpf_get_current_pid_tgid();
-    event.timestamp = bpf_ktime_get_ns();
-    event.type = EVENT_TYPE_SOCKET_WRITE;
-    event.conn_id = (__u32)(unsigned long)sk;
-
+    // Check if this is an active file descriptor
+    bool *is_active = bpf_map_lookup_elem(&active_fds, &fd);
+    if (!is_active) {
+        return 0;
+    }
+    
     // Get process name for debugging
     char comm[16];
     bpf_get_current_comm(&comm, sizeof(comm));
     
     // Debug log
-    bpf_printk("TCP send from %s (pid=%d len=%d)", comm, event.pid, len);
+    bpf_printk("close from %s (fd=%d)", comm, fd);
 
-    // Try to read the data
-    if (buf != NULL && len > 0) {
-        // Cap the length
-        if (len > MAX_MSG_SIZE) {
-            len = MAX_MSG_SIZE;
-        }
-        event.data_len = len;
-
-        // Try to read the data
-        if (bpf_probe_read_user(event.data, len, buf) < 0) {
-            bpf_printk("TCP send: failed to read buffer");
-            return 0;
-        }
-
-        // Log the first few bytes for debugging
-        if (len >= 4) {
-            // Split the logging into two calls
-            bpf_printk("TCP send data (1/2): %c%c", event.data[0], event.data[1]);
-            bpf_printk("TCP send data (2/2): %c%c", event.data[2], event.data[3]);
-        }
-
-        // Check if it's HTTP
-        if (is_http_data(event.data, event.data_len)) {
-            bpf_printk("TCP send: sending HTTP event from %s", comm);
-            bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
-        }
-    }
-
-    return 0;
-}
-
-// Trace TCP connect
-SEC("kprobe/tcp_v4_connect")
-int trace_tcp_connect(struct pt_regs *ctx) {
-    http_event_t event = {};
-    struct sock *sk = (struct sock *)ctx->rdi;
-    struct sockaddr_in *addr = (struct sockaddr_in *)ctx->rsi;
-
-    // Get process and thread IDs
-    event.pid = bpf_get_current_pid_tgid() >> 32;
-    event.tid = (__u32)bpf_get_current_pid_tgid();
-    event.timestamp = bpf_ktime_get_ns();
-    event.type = EVENT_TYPE_SOCKET_WRITE;
-    event.conn_id = (__u32)(unsigned long)sk;
-
-    // Log debug information
-    bpf_printk("tcp_v4_connect: pid=%d sk=%p addr=%p", event.pid, sk, addr);
-
-    // Update connection state
-    __u32 *state = bpf_map_lookup_elem(&conn_state, &event.conn_id);
-    if (!state) {
-        __u32 new_state = 1;
-        bpf_map_update_elem(&conn_state, &event.conn_id, &new_state, BPF_ANY);
-        bpf_printk("tcp_v4_connect: new connection state created");
-    }
+    // Remove the file descriptor from active list
+    bpf_map_delete_elem(&active_fds, &fd);
 
     return 0;
 }
