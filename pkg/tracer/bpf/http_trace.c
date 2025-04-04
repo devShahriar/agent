@@ -21,6 +21,19 @@
 #define asm_inline asm
 #endif
 
+// Define tracepoint types for the bpf2go generator
+struct trace_event_raw_sys_enter {
+    unsigned long long unused;
+    long id;
+    unsigned long args[6];
+};
+
+struct trace_event_raw_sys_exit {
+    unsigned long long unused;
+    long id;
+    long ret;
+};
+
 // Maximum size for our data buffer - must be power of 2
 #define MAX_MSG_SIZE 1024
 
@@ -245,7 +258,7 @@ static __always_inline int is_http_data(const char *data, size_t len) {
 
 // Trace accept4 syscall - Mark socket as active
 SEC("tracepoint/syscalls/sys_enter_accept4")
-int trace_accept4(struct trace_event_raw_sys_enter *ctx) {
+int TraceAccept4(struct trace_event_raw_sys_enter *ctx) {
     // Extract parameters
     int sockfd = ctx->args[0];
     // Return value only available in exit event
@@ -257,7 +270,7 @@ int trace_accept4(struct trace_event_raw_sys_enter *ctx) {
 
 // Exit handler for accept4
 SEC("tracepoint/syscalls/sys_exit_accept4")
-int trace_accept4_exit(struct trace_event_raw_sys_exit *ctx) {
+int TraceAccept4Exit(struct trace_event_raw_sys_exit *ctx) {
     int ret_fd = ctx->ret;
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     
@@ -293,7 +306,7 @@ int trace_accept4_exit(struct trace_event_raw_sys_exit *ctx) {
 
 // Trace connect syscall - Mark socket as active for clients
 SEC("tracepoint/syscalls/sys_enter_connect")
-int trace_connect(struct trace_event_raw_sys_enter *ctx) {
+int TraceConnect(struct trace_event_raw_sys_enter *ctx) {
     // Extract parameters
     int sockfd = ctx->args[0];
     
@@ -330,7 +343,7 @@ int trace_connect(struct trace_event_raw_sys_enter *ctx) {
 
 // Trace write syscall - Capture HTTP requests
 SEC("tracepoint/syscalls/sys_enter_write")
-int trace_write(struct trace_event_raw_sys_enter *ctx) {
+int TraceWrite(struct trace_event_raw_sys_enter *ctx) {
     // Extract parameters
     int fd = ctx->args[0];
     char *buf = (char *)ctx->args[1];
@@ -393,7 +406,7 @@ int trace_write(struct trace_event_raw_sys_enter *ctx) {
 
 // Trace read syscall - Capture HTTP responses 
 SEC("tracepoint/syscalls/sys_enter_read")
-int trace_read(struct trace_event_raw_sys_enter *ctx) {
+int TraceRead(struct trace_event_raw_sys_enter *ctx) {
     // Extract parameters before the syscall executes
     int fd = ctx->args[0];
     char *buf = (char *)ctx->args[1];
@@ -432,7 +445,7 @@ int trace_read(struct trace_event_raw_sys_enter *ctx) {
 
 // Return probe for read syscall
 SEC("tracepoint/syscalls/sys_exit_read")
-int trace_read_ret(struct trace_event_raw_sys_exit *ctx) {
+int TraceReadRet(struct trace_event_raw_sys_exit *ctx) {
     // Get the return value (bytes read)
     size_t bytes_read = ctx->ret;
     __u64 id = bpf_get_current_pid_tgid();
@@ -489,7 +502,7 @@ int trace_read_ret(struct trace_event_raw_sys_exit *ctx) {
 
 // Trace close syscall - Remove from active sockets
 SEC("tracepoint/syscalls/sys_enter_close")
-int trace_close(struct trace_event_raw_sys_enter *ctx) {
+int TraceClose(struct trace_event_raw_sys_enter *ctx) {
     int fd = ctx->args[0];
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     
