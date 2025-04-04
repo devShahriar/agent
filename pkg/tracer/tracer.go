@@ -732,6 +732,16 @@ func (t *Tracer) pollEvents() {
 			httpEvent.ProcessName = name
 			httpEvent.Command = cmdLine
 
+			// Skip CoreDNS events - ignore all events from the CoreDNS process
+			if httpEvent.ProcessName == "coredns" ||
+				strings.Contains(strings.ToLower(httpEvent.Command), "coredns") {
+				t.logger.WithFields(logrus.Fields{
+					"pid":          httpEvent.PID,
+					"process_name": httpEvent.ProcessName,
+				}).Debug("Skipping CoreDNS event")
+				continue
+			}
+
 			t.logger.WithFields(logrus.Fields{
 				"pid":          httpEvent.PID,
 				"process_name": httpEvent.ProcessName,
