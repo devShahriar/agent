@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -327,6 +328,9 @@ func NewTracer(
 		}
 	}
 
+	// Clean up any existing pinned maps
+	cleanupPinnedMaps(bpfDir)
+
 	// Load pre-compiled programs with modified options
 	opts := &ebpf.CollectionOptions{
 		Programs: ebpf.ProgramOptions{
@@ -372,6 +376,26 @@ func NewTracer(
 	}
 
 	return t, nil
+}
+
+// cleanupPinnedMaps removes any existing pinned maps
+func cleanupPinnedMaps(bpfDir string) {
+	// List of maps to clean up
+	maps := []string{
+		"events",
+		"conn_state",
+		"process_info",
+		"active_fds",
+		"event_storage",
+	}
+
+	for _, mapName := range maps {
+		mapPath := filepath.Join(bpfDir, mapName)
+		if err := os.Remove(mapPath); err != nil && !os.IsNotExist(err) {
+			logrus.WithError(err).WithField("map", mapName).
+				Warn("Failed to remove pinned map")
+		}
+	}
 }
 
 // LoadSSLPrograms loads SSL tracing programs without using vDSO
