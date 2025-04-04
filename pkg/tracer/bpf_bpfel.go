@@ -53,20 +53,21 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
-	TraceSslRead    *ebpf.ProgramSpec `ebpf:"trace_ssl_read"`
-	TraceSslWrite   *ebpf.ProgramSpec `ebpf:"trace_ssl_write"`
-	TraceTcpConnect *ebpf.ProgramSpec `ebpf:"trace_tcp_connect"`
-	TraceTcpRecv    *ebpf.ProgramSpec `ebpf:"trace_tcp_recv"`
-	TraceTcpSend    *ebpf.ProgramSpec `ebpf:"trace_tcp_send"`
+	TraceAccept4 *ebpf.ProgramSpec `ebpf:"trace_accept4"`
+	TraceClose   *ebpf.ProgramSpec `ebpf:"trace_close"`
+	TraceRead    *ebpf.ProgramSpec `ebpf:"trace_read"`
+	TraceWrite   *ebpf.ProgramSpec `ebpf:"trace_write"`
 }
 
 // bpfMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	ConnState   *ebpf.MapSpec `ebpf:"conn_state"`
-	Events      *ebpf.MapSpec `ebpf:"events"`
-	ProcessInfo *ebpf.MapSpec `ebpf:"process_info"`
+	ActiveFds    *ebpf.MapSpec `ebpf:"active_fds"`
+	ConnState    *ebpf.MapSpec `ebpf:"conn_state"`
+	EventStorage *ebpf.MapSpec `ebpf:"event_storage"`
+	Events       *ebpf.MapSpec `ebpf:"events"`
+	ProcessInfo  *ebpf.MapSpec `ebpf:"process_info"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -88,14 +89,18 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	ConnState   *ebpf.Map `ebpf:"conn_state"`
-	Events      *ebpf.Map `ebpf:"events"`
-	ProcessInfo *ebpf.Map `ebpf:"process_info"`
+	ActiveFds    *ebpf.Map `ebpf:"active_fds"`
+	ConnState    *ebpf.Map `ebpf:"conn_state"`
+	EventStorage *ebpf.Map `ebpf:"event_storage"`
+	Events       *ebpf.Map `ebpf:"events"`
+	ProcessInfo  *ebpf.Map `ebpf:"process_info"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
+		m.ActiveFds,
 		m.ConnState,
+		m.EventStorage,
 		m.Events,
 		m.ProcessInfo,
 	)
@@ -105,20 +110,18 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
-	TraceSslRead    *ebpf.Program `ebpf:"trace_ssl_read"`
-	TraceSslWrite   *ebpf.Program `ebpf:"trace_ssl_write"`
-	TraceTcpConnect *ebpf.Program `ebpf:"trace_tcp_connect"`
-	TraceTcpRecv    *ebpf.Program `ebpf:"trace_tcp_recv"`
-	TraceTcpSend    *ebpf.Program `ebpf:"trace_tcp_send"`
+	TraceAccept4 *ebpf.Program `ebpf:"trace_accept4"`
+	TraceClose   *ebpf.Program `ebpf:"trace_close"`
+	TraceRead    *ebpf.Program `ebpf:"trace_read"`
+	TraceWrite   *ebpf.Program `ebpf:"trace_write"`
 }
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
-		p.TraceSslRead,
-		p.TraceSslWrite,
-		p.TraceTcpConnect,
-		p.TraceTcpRecv,
-		p.TraceTcpSend,
+		p.TraceAccept4,
+		p.TraceClose,
+		p.TraceRead,
+		p.TraceWrite,
 	)
 }
 
