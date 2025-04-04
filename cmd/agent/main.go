@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
+	"path"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -58,12 +61,26 @@ func main() {
 
 	// Set up logging
 	log := logrus.New()
-	log.SetFormatter(&logrus.JSONFormatter{})
-	log.SetLevel(logrus.DebugLevel)
+	log.SetFormatter(&logrus.JSONFormatter{
+		// Add timestamp formatting
+		TimestampFormat: time.RFC3339,
+		// Add caller information to help with debugging
+		CallerPrettyfier: func(f *runtime.Frame) (string, string) {
+			filename := path.Base(f.File)
+			return fmt.Sprintf("%s()", f.Function), fmt.Sprintf("%s:%d", filename, f.Line)
+		},
+	})
+
+	// Set log level
+	level, err := logrus.ParseLevel(*logLevel)
+	if err != nil {
+		log.WithError(err).Warn("Invalid log level, defaulting to info")
+		level = logrus.InfoLevel
+	}
+	log.SetLevel(level)
 
 	// Create storage
 	var storage tracer.Storage
-	var err error
 	if *storageType == "file" {
 		storage, err = tracer.NewFileStorage(*fileDir)
 		if err != nil {
@@ -87,19 +104,23 @@ func main() {
 
 	// Set up event callback
 	t.SetEventCallback(func(event tracer.HTTPEvent) {
+		// Skip detailed logging for non-target applications unless in debug mode
+		if log.Level != logrus.DebugLevel &&
+			!tracer.IsRelevantApplication(event.ProcessName, event.Command) {
+			return
+		}
+
 		// Log event summary
 		log.WithFields(logrus.Fields{
 			"type":         event.Type,
 			"pid":          event.PID,
 			"tid":          event.TID,
 			"process_name": event.ProcessName,
-			"command":      event.Command,
 			"method":       event.Method,
 			"url":          event.URL,
 			"status_code":  event.StatusCode,
 			"content_type": event.ContentType,
 			"data_len":     event.DataLen,
-			"data":         string(event.Data[:event.DataLen]),
 		}).Info("HTTP event received")
 
 		// Store event

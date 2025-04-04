@@ -829,21 +829,63 @@ func formatHTTPData(event *HTTPEvent) string {
 		return ""
 	}
 
-	data := string(event.Data[:event.DataLen])
+	// Clean up the data by removing null bytes and control characters
+	cleanData := make([]byte, 0, event.DataLen)
+	for i := 0; i < int(event.DataLen); i++ {
+		b := event.Data[i]
+		// Skip null bytes and most control characters
+		if b == 0 || (b < 32 && b != '\n' && b != '\r' && b != '\t') {
+			continue
+		}
+		cleanData = append(cleanData, b)
+	}
+
+	// Convert to string after cleaning
+	data := string(cleanData)
+
+	// Handle HTTP data that starts with null bytes followed by HTTP
+	if strings.Contains(data, "HTTP/1.1") && !strings.HasPrefix(data, "HTTP/1.1") {
+		index := strings.Index(data, "HTTP/1.1")
+		if index > 0 {
+			data = data[index:]
+		}
+	}
+
+	// Same for request methods
+	for _, method := range []string{"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"} {
+		if strings.Contains(data, method+" ") && !strings.HasPrefix(data, method+" ") {
+			index := strings.Index(data, method+" ")
+			if index > 0 {
+				data = data[index:]
+			}
+			break
+		}
+	}
+
 	lines := strings.Split(data, "\r\n")
+	if len(lines) == 1 {
+		// Try splitting by newline if CR+LF doesn't work
+		lines = strings.Split(data, "\n")
+	}
+
 	if len(lines) == 0 {
-		return ""
+		return data // Return raw data if we can't parse into lines
 	}
 
 	// Format headers and body with proper indentation
 	var formatted strings.Builder
 
-	// Add first line (request/status line)
-	formatted.WriteString(lines[0])
-	formatted.WriteString("\n")
+	// Handle request/response line
+	if len(lines[0]) > 0 {
+		formatted.WriteString(lines[0])
+		formatted.WriteString("\n")
+	}
 
-	// Add headers
+	// Track headers and body
 	inHeaders := true
+	bodyContent := ""
+
+	// Add headers and detect body
 	for i := 1; i < len(lines); i++ {
 		if lines[i] == "" {
 			inHeaders = false
@@ -856,24 +898,35 @@ func formatHTTPData(event *HTTPEvent) string {
 			formatted.WriteString(lines[i])
 			formatted.WriteString("\n")
 		} else {
-			// Try to pretty-print JSON body
-			if i == len(lines)-1 && strings.Contains(data, "Content-Type: application/json") {
-				var jsonData interface{}
-				if err := json.Unmarshal([]byte(lines[i]), &jsonData); err == nil {
-					// Pretty-print JSON
-					prettyJSON, err := json.MarshalIndent(jsonData, "  ", "  ")
-					if err == nil {
-						formatted.WriteString("  ")
-						formatted.WriteString(string(prettyJSON))
-						break
-					}
+			// Collect body content
+			if bodyContent == "" {
+				bodyContent = lines[i]
+			} else {
+				bodyContent += "\n" + lines[i]
+			}
+		}
+	}
+
+	// Format body if present
+	if bodyContent != "" {
+		// Try to detect and format JSON
+		if strings.Contains(data, "Content-Type: application/json") ||
+			strings.Contains(data, "content-type: application/json") {
+			var jsonData interface{}
+			if err := json.Unmarshal([]byte(bodyContent), &jsonData); err == nil {
+				// Pretty-print JSON
+				prettyJSON, err := json.MarshalIndent(jsonData, "  ", "  ")
+				if err == nil {
+					formatted.WriteString("  Body (JSON):\n  ")
+					formatted.WriteString(string(prettyJSON))
+					return formatted.String()
 				}
 			}
-			// Regular body formatting
-			formatted.WriteString("  ")
-			formatted.WriteString(lines[i])
-			formatted.WriteString("\n")
 		}
+
+		// Regular body formatting
+		formatted.WriteString("  Body:\n  ")
+		formatted.WriteString(strings.ReplaceAll(bodyContent, "\n", "\n  "))
 	}
 
 	return formatted.String()
@@ -1036,12 +1089,23 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 	if event.Type == EventTypeSSLWrite || event.Type == EventTypeSocketWrite {
 		// Store the request in the connection map
 		t.connections[connKey] = event
-		t.logger.WithFields(logrus.Fields{
-			"conn_key": connKey,
-			"method":   event.Method,
-			"url":      event.URL,
-			"data":     formattedData,
-		}).Debug("Stored HTTP request")
+
+		// Only log detailed debug info for relevant applications
+		if IsRelevantApplication(event.ProcessName, event.Command) {
+			t.logger.WithFields(logrus.Fields{
+				"conn_key": connKey,
+				"method":   event.Method,
+				"url":      event.URL,
+				"data":     formattedData,
+			}).Debug("Stored HTTP request")
+		} else {
+			// Simplified log for less relevant applications
+			t.logger.WithFields(logrus.Fields{
+				"conn_key": connKey,
+				"method":   event.Method,
+				"url":      event.URL,
+			}).Debug("Stored HTTP request")
+		}
 	} else if event.Type == EventTypeSSLRead || event.Type == EventTypeSocketRead {
 		// It's a response - look for the matching request
 		if req, ok := t.connections[connKey]; ok {
@@ -1060,16 +1124,28 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 			reqFormatted := formatHTTPData(req)
 			respFormatted := formattedData
 
-			// Log the complete transaction with better formatting
-			t.logger.WithFields(logrus.Fields{
-				"method":      req.Method,
-				"url":         req.URL,
-				"status_code": event.StatusCode,
-				"duration_ms": tx.Duration.Milliseconds(),
-				"process":     tx.ProcessName,
-				"request":     reqFormatted,
-				"response":    respFormatted,
-			}).Info("HTTP Transaction completed")
+			// Only log transactions for relevant applications at INFO level
+			if IsRelevantApplication(tx.ProcessName, tx.Command) {
+				// Log the complete transaction with better formatting
+				t.logger.WithFields(logrus.Fields{
+					"method":      req.Method,
+					"url":         req.URL,
+					"status_code": event.StatusCode,
+					"duration_ms": tx.Duration.Milliseconds(),
+					"process":     tx.ProcessName,
+					"request":     reqFormatted,
+					"response":    respFormatted,
+				}).Info("HTTP Transaction completed")
+			} else {
+				// More concise log for less relevant applications at DEBUG level
+				t.logger.WithFields(logrus.Fields{
+					"method":      req.Method,
+					"url":         req.URL,
+					"status_code": event.StatusCode,
+					"duration_ms": tx.Duration.Milliseconds(),
+					"process":     tx.ProcessName,
+				}).Debug("HTTP Transaction completed")
+			}
 
 			// Store the transaction
 			if t.storage != nil {
@@ -1082,11 +1158,20 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 			delete(t.connections, connKey)
 		} else {
 			// We got a response without a matching request
-			t.logger.WithFields(logrus.Fields{
-				"conn_key":    connKey,
-				"status_code": event.StatusCode,
-				"data":        formattedData,
-			}).Debug("Received orphaned HTTP response")
+			// Only log detailed orphaned responses for relevant applications
+			if IsRelevantApplication(event.ProcessName, event.Command) {
+				t.logger.WithFields(logrus.Fields{
+					"conn_key":    connKey,
+					"status_code": event.StatusCode,
+					"data":        formattedData,
+				}).Debug("Received orphaned HTTP response")
+			} else {
+				// Minimal log for less relevant applications
+				t.logger.WithFields(logrus.Fields{
+					"conn_key":    connKey,
+					"status_code": event.StatusCode,
+				}).Debug("Received orphaned HTTP response")
+			}
 		}
 	}
 
@@ -1099,6 +1184,31 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 			delete(t.connections, key)
 		}
 	}
+}
+
+// IsRelevantApplication determines if the process is one we want detailed logs for
+func IsRelevantApplication(processName, command string) bool {
+	// Focus on our dummy HTTP server/client or other specific applications
+	relevantProcesses := []string{"gunicorn", "python", "curl", "httpbin", "dummy"}
+
+	processNameLower := strings.ToLower(processName)
+	commandLower := strings.ToLower(command)
+
+	// Check process name
+	for _, proc := range relevantProcesses {
+		if strings.Contains(processNameLower, proc) {
+			return true
+		}
+	}
+
+	// Check command
+	for _, proc := range relevantProcesses {
+		if strings.Contains(commandLower, proc) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Stop stops tracing HTTP traffic
