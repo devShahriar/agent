@@ -491,6 +491,15 @@ func (t *Tracer) Start() error {
 			t.logger.Info("Successfully attached sys_write kprobe")
 		}
 
+		// Attach read kprobe
+		kp, err = link.Kprobe("sys_read", t.objs.TraceRead, nil)
+		if err != nil {
+			t.logger.WithError(err).Error("Failed to attach sys_read kprobe")
+		} else {
+			t.uprobes = append(t.uprobes, kp)
+			t.logger.Info("Successfully attached sys_read kprobe")
+		}
+
 		// Attach close kprobe
 		kp, err = link.Kprobe("sys_close", t.objs.TraceClose, nil)
 		if err != nil {
