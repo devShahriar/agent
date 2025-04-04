@@ -251,20 +251,24 @@ func NewElasticsearchStorage(url, index string) (Storage, error) {
 
 // Store implements Storage interface
 func (s *ElasticsearchStorage) Store(event HTTPEvent) error {
+	// Format data for human-readable storage
+	formattedData := FormatHTTPData(&event)
+
 	// Create the document
 	doc := map[string]interface{}{
-		"timestamp":    time.Unix(0, int64(event.Timestamp)),
-		"type":         event.Type,
-		"pid":          event.PID,
-		"tid":          event.TID,
-		"process_name": event.ProcessName,
-		"command":      event.Command,
-		"method":       event.Method,
-		"url":          event.URL,
-		"status_code":  event.StatusCode,
-		"content_type": event.ContentType,
-		"data_len":     event.DataLen,
-		"data":         string(event.Data[:event.DataLen]),
+		"timestamp":      time.Unix(0, int64(event.Timestamp)),
+		"type":           event.Type,
+		"pid":            event.PID,
+		"tid":            event.TID,
+		"process_name":   event.ProcessName,
+		"command":        event.Command,
+		"method":         event.Method,
+		"url":            event.URL,
+		"status_code":    event.StatusCode,
+		"content_type":   event.ContentType,
+		"data_len":       event.DataLen,
+		"data":           string(event.Data[:event.DataLen]),
+		"formatted_data": formattedData,
 	}
 
 	// Marshal the document to JSON
@@ -953,42 +957,84 @@ func FormatHTTPData(event *HTTPEvent) string {
 		return data // Return raw data if we can't parse into lines
 	}
 
-	// Format headers and body with proper indentation
-	var formatted strings.Builder
+	// Create structured data for JSON output
+	result := make(map[string]interface{})
 
-	// Handle request/response line
+	// Parse headers and body
+	headers := make(map[string]string)
+	var bodyContent string
+
+	// Track request/response info
+	var queryParams map[string]string
+
+	// Parse first line for request/response info
 	if len(lines[0]) > 0 {
-		formatted.WriteString(lines[0])
-		formatted.WriteString("\n")
+		if strings.HasPrefix(lines[0], "HTTP/") {
+			// This is a response
+			parts := strings.SplitN(lines[0], " ", 3)
+			if len(parts) >= 2 {
+				statusMessage := parts[1]
+				if len(parts) >= 3 {
+					statusMessage += " " + parts[2]
+				}
+				result["response_status"] = statusMessage
+			}
+		} else {
+			// This is a request
+			parts := strings.SplitN(lines[0], " ", 3)
+			if len(parts) >= 2 {
+				result["method"] = parts[0]
+				urlStr := parts[1]
+
+				// Extract query parameters if present
+				if strings.Contains(urlStr, "?") {
+					urlParts := strings.SplitN(urlStr, "?", 2)
+					result["path"] = urlParts[0]
+					queryStr := urlParts[1]
+
+					// Parse query parameters
+					queryParams = make(map[string]string)
+					params := strings.Split(queryStr, "&")
+					for _, param := range params {
+						if param == "" {
+							continue
+						}
+						keyVal := strings.SplitN(param, "=", 2)
+						key := keyVal[0]
+						var value string
+						if len(keyVal) > 1 {
+							value = keyVal[1]
+						}
+						queryParams[key] = value
+					}
+					result["query_parameters"] = queryParams
+				} else {
+					result["path"] = urlStr
+				}
+			}
+		}
 	}
 
-	// Track headers and body
+	// Parse headers
 	inHeaders := true
-	bodyContent := ""
-	headers := make(map[string]string)
+	headerEnd := false
 
-	// Add headers and detect body
 	for i := 1; i < len(lines); i++ {
 		if lines[i] == "" {
 			inHeaders = false
-			formatted.WriteString("\n")
+			headerEnd = true
 			continue
 		}
 
 		if inHeaders {
-			formatted.WriteString("  ")
-			formatted.WriteString(lines[i])
-			formatted.WriteString("\n")
-
-			// Parse headers for later use
 			parts := strings.SplitN(lines[i], ":", 2)
 			if len(parts) == 2 {
 				key := strings.TrimSpace(parts[0])
 				value := strings.TrimSpace(parts[1])
 				headers[key] = value
 			}
-		} else {
-			// Collect body content
+		} else if headerEnd {
+			// We're in the body
 			if bodyContent == "" {
 				bodyContent = lines[i]
 			} else {
@@ -997,29 +1043,34 @@ func FormatHTTPData(event *HTTPEvent) string {
 		}
 	}
 
-	// Format body if present
+	result["headers"] = headers
+
+	// Process body if present
 	if bodyContent != "" {
 		// Try to detect and format JSON
-		if strings.Contains(strings.ToLower(data), "content-type: application/json") ||
-			strings.Contains(strings.ToLower(data), "content-type:application/json") {
+		contentType, hasContentType := headers["Content-Type"]
+		if hasContentType && strings.Contains(contentType, "application/json") {
 			var jsonData interface{}
 			if err := json.Unmarshal([]byte(bodyContent), &jsonData); err == nil {
-				// Pretty-print JSON
-				prettyJSON, err := json.MarshalIndent(jsonData, "  ", "  ")
-				if err == nil {
-					formatted.WriteString("  Body (JSON):\n  ")
-					formatted.WriteString(string(prettyJSON))
-					return formatted.String()
-				}
+				// Add parsed JSON body
+				result["body"] = jsonData
+			} else {
+				// Add raw body
+				result["body"] = bodyContent
 			}
+		} else {
+			// Add raw body for non-JSON content
+			result["body"] = bodyContent
 		}
-
-		// Regular body formatting
-		formatted.WriteString("  Body:\n  ")
-		formatted.WriteString(strings.ReplaceAll(bodyContent, "\n", "\n  "))
 	}
 
-	return formatted.String()
+	// Marshal to JSON string
+	jsonData, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return "Error formatting HTTP data: " + err.Error()
+	}
+
+	return string(jsonData)
 }
 
 // parseBodyAsJSON attempts to parse an HTTP event body as JSON

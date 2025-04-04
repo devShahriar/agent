@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: abproxy-agent
+  namespace: monitoring
+  labels:
+    app: abproxy-agent
+spec:
+  selector:
+    matchLabels:
+      app: abproxy-agent
+  template:
+    metadata:
+      labels:
+        app: abproxy-agent
+      annotations:
+        date: "1743806000" # Force update with new timestamp
+    spec:
+      containers:
+        - name: abproxy-agent
+          image: devshahriar/abproxy-agent:v1.46.0
+          imagePullPolicy: Always
+          env:
+            - name: DEBUG
+              value: "true"
+            - name: LIBEBPF_IGNORE_VDSO_ERR
+              value: "1"
+            - name: BPF_FORCE_KERNEL_VERSION
+              value: "0"
+            - name: LOG_LEVEL
+              value: debug
+          # Remove STORAGE_TYPE env var since it will be passed as argument
+          securityContext:
+            allowPrivilegeEscalation: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - SYS_RESOURCE
+                - SYS_PTRACE
+                - NET_ADMIN
+                - PERFMON
+                - BPF
+                - IPC_LOCK
+            privileged: true
+            runAsUser: 0
+            seLinuxOptions:
+              type: unconfined_t
+          volumeMounts:
+            - mountPath: /sys
+              name: sys
+            - mountPath: /lib/modules
+              name: modules
+              readOnly: true
+            - mountPath: /sys/kernel/debug
+              name: debugfs
+            - mountPath: /sys/fs/cgroup
+              name: cgroup
+              readOnly: true
+      hostNetwork: true
+      hostPID: true
+      initContainers:
+        - name: bpf-mount
+          image: alpine:latest
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              nsenter -t 1 -m -- /bin/sh -c '
+              if ! mount | grep "type bpf"; then
+                mount -t bpf bpf /sys/fs/bpf/
+              fi
+              mkdir -p /sys/fs/bpf/abproxy
+              chmod 700 /sys/fs/bpf/abproxy
+              # Set correct SELinux context if available
+              if command -v chcon > /dev/null 2>&1; then
+                chcon -R -t bpf_t /sys/fs/bpf/ || true
+              fi
+              # Ensure kernel allows unprivileged BPF
+              if [ -f /proc/sys/kernel/unprivileged_bpf_disabled ]; then
+                echo 0 > /proc/sys/kernel/unprivileged_bpf_disabled
+              fi
+              # Set resource limits
+              if [ -f /proc/sys/net/core/bpf_jit_limit ]; then
+                echo 1000000000 > /proc/sys/net/core/bpf_jit_limit
+              fi
+              '
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - mountPath: /sys
+              name: sys
+      volumes:
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: modules
+          hostPath:
+            path: /lib/modules
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
