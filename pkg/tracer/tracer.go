@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -143,10 +144,10 @@ func (s *FileStorage) StoreTransaction(transaction HTTPTransaction) error {
 	defer s.mu.Unlock()
 
 	// Format request and response data for human-readable storage
-	requestFormatted := formatHTTPData(transaction.Request)
+	requestFormatted := FormatHTTPData(transaction.Request)
 	var responseFormatted string
 	if transaction.Response != nil {
-		responseFormatted = formatHTTPData(transaction.Response)
+		responseFormatted = FormatHTTPData(transaction.Response)
 	}
 
 	// Create a filename based on timestamp and PID
@@ -280,16 +281,33 @@ func (s *ElasticsearchStorage) Store(event HTTPEvent) error {
 		Refresh:    "true",
 	}
 
+	s.logger.WithFields(logrus.Fields{
+		"index": s.index,
+		"url":   s.url,
+		"id":    req.DocumentID,
+	}).Debug("Indexing HTTP event in Elasticsearch")
+
 	// Perform the request
 	res, err := req.Do(context.Background(), s.client)
 	if err != nil {
+		s.logger.WithError(err).Error("Failed to send request to Elasticsearch")
 		return fmt.Errorf("failed to index document: %w", err)
 	}
 	defer res.Body.Close()
 
 	if res.IsError() {
+		responseBody, _ := io.ReadAll(res.Body)
+		s.logger.WithFields(logrus.Fields{
+			"status_code": res.StatusCode,
+			"response":    string(responseBody),
+		}).Error("Error response from Elasticsearch")
 		return fmt.Errorf("error indexing document: %s", res.String())
 	}
+
+	s.logger.WithFields(logrus.Fields{
+		"index": s.index,
+		"id":    req.DocumentID,
+	}).Debug("Successfully indexed HTTP event in Elasticsearch")
 
 	return nil
 }
@@ -297,10 +315,17 @@ func (s *ElasticsearchStorage) Store(event HTTPEvent) error {
 // StoreTransaction implements Storage interface
 func (s *ElasticsearchStorage) StoreTransaction(transaction HTTPTransaction) error {
 	// Format request and response data for human-readable storage
-	requestFormatted := formatHTTPData(transaction.Request)
+	requestFormatted := FormatHTTPData(transaction.Request)
 	var responseFormatted string
 	if transaction.Response != nil {
-		responseFormatted = formatHTTPData(transaction.Response)
+		responseFormatted = FormatHTTPData(transaction.Response)
+	}
+
+	// Try to parse request and response body as JSON if possible
+	requestBody := parseBodyAsJSON(transaction.Request)
+	var responseBody interface{}
+	if transaction.Response != nil {
+		responseBody = parseBodyAsJSON(transaction.Response)
 	}
 
 	// Create the document
@@ -308,8 +333,9 @@ func (s *ElasticsearchStorage) StoreTransaction(transaction HTTPTransaction) err
 		"start_time":   transaction.StartTime,
 		"end_time":     transaction.EndTime,
 		"duration_ms":  transaction.Duration.Milliseconds(),
-		"process_name": transaction.ProcessName,
+		"service_name": transaction.ProcessName,
 		"command":      transaction.Command,
+		"timestamp":    time.Now().Format(time.RFC3339),
 		"request": map[string]interface{}{
 			"method": transaction.Request.Method,
 			"url":    transaction.Request.URL,
@@ -317,6 +343,7 @@ func (s *ElasticsearchStorage) StoreTransaction(transaction HTTPTransaction) err
 				transaction.Request.Data[:transaction.Request.DataLen],
 			),
 			"formatted_data": requestFormatted,
+			"body":           requestBody,
 		},
 	}
 
@@ -329,6 +356,7 @@ func (s *ElasticsearchStorage) StoreTransaction(transaction HTTPTransaction) err
 				transaction.Response.Data[:transaction.Response.DataLen],
 			),
 			"formatted_data": responseFormatted,
+			"body":           responseBody,
 		}
 	}
 
@@ -338,29 +366,64 @@ func (s *ElasticsearchStorage) StoreTransaction(transaction HTTPTransaction) err
 		return fmt.Errorf("failed to marshal transaction document: %w", err)
 	}
 
-	// Create the index request
+	// Create a more descriptive index name
+	indexName := fmt.Sprintf(
+		"%s-http-transactions-%s",
+		s.index,
+		time.Now().Format("2006-01-02"),
+	)
+
+	// Create a unique ID for the transaction
+	docID := fmt.Sprintf(
+		"%d-%d-%d",
+		transaction.Request.PID,
+		transaction.Request.TID,
+		transaction.Request.Timestamp,
+	)
+
+	// Create the index request with dynamic index name
 	req := esapi.IndexRequest{
-		Index: fmt.Sprintf("%s-transactions", s.index),
-		DocumentID: fmt.Sprintf(
-			"%d-%d-%d",
-			transaction.Request.PID,
-			transaction.Request.TID,
-			transaction.Request.Timestamp,
-		),
-		Body:    bytes.NewReader(data),
-		Refresh: "true",
+		Index:      indexName,
+		DocumentID: docID,
+		Body:       bytes.NewReader(data),
+		Refresh:    "true",
 	}
+
+	s.logger.WithFields(logrus.Fields{
+		"index":        indexName,
+		"url":          s.url,
+		"id":           docID,
+		"method":       transaction.Request.Method,
+		"request_url":  transaction.Request.URL,
+		"status_code":  getResponseStatusCode(transaction.Response),
+		"service_name": transaction.ProcessName,
+	}).Info("Indexing HTTP transaction in Elasticsearch")
 
 	// Perform the request
 	res, err := req.Do(context.Background(), s.client)
 	if err != nil {
+		s.logger.WithError(err).Error("Failed to send transaction to Elasticsearch")
 		return fmt.Errorf("failed to index transaction document: %w", err)
 	}
 	defer res.Body.Close()
 
 	if res.IsError() {
+		responseData, _ := io.ReadAll(res.Body)
+		s.logger.WithFields(logrus.Fields{
+			"status_code": res.StatusCode,
+			"response":    string(responseData),
+			"index":       indexName,
+		}).Error("Error response from Elasticsearch when indexing transaction")
 		return fmt.Errorf("error indexing transaction document: %s", res.String())
 	}
+
+	s.logger.WithFields(logrus.Fields{
+		"index":        indexName,
+		"id":           docID,
+		"method":       transaction.Request.Method,
+		"request_url":  transaction.Request.URL,
+		"service_name": transaction.ProcessName,
+	}).Info("Successfully indexed HTTP transaction in Elasticsearch")
 
 	return nil
 }
@@ -837,18 +900,22 @@ func parseHTTPData(event *HTTPEvent) {
 	}
 }
 
-// formatHTTPData returns a human-readable formatted version of HTTP data
-func formatHTTPData(event *HTTPEvent) string {
+// FormatHTTPData returns a human-readable formatted version of HTTP data
+func FormatHTTPData(event *HTTPEvent) string {
 	if event == nil || event.DataLen == 0 {
 		return ""
 	}
 
-	// Clean up the data by removing null bytes and control characters
+	// Clean up the data by removing null bytes and control characters except newlines
 	cleanData := make([]byte, 0, event.DataLen)
 	for i := 0; i < int(event.DataLen); i++ {
 		b := event.Data[i]
-		// Skip null bytes and most control characters
+		// Skip null bytes and most control characters except newlines, returns, tabs
 		if b == 0 || (b < 32 && b != '\n' && b != '\r' && b != '\t') {
+			continue
+		}
+		// Skip non-printable high bytes
+		if b > 127 {
 			continue
 		}
 		cleanData = append(cleanData, b)
@@ -898,6 +965,7 @@ func formatHTTPData(event *HTTPEvent) string {
 	// Track headers and body
 	inHeaders := true
 	bodyContent := ""
+	headers := make(map[string]string)
 
 	// Add headers and detect body
 	for i := 1; i < len(lines); i++ {
@@ -911,6 +979,14 @@ func formatHTTPData(event *HTTPEvent) string {
 			formatted.WriteString("  ")
 			formatted.WriteString(lines[i])
 			formatted.WriteString("\n")
+
+			// Parse headers for later use
+			parts := strings.SplitN(lines[i], ":", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				headers[key] = value
+			}
 		} else {
 			// Collect body content
 			if bodyContent == "" {
@@ -924,8 +1000,8 @@ func formatHTTPData(event *HTTPEvent) string {
 	// Format body if present
 	if bodyContent != "" {
 		// Try to detect and format JSON
-		if strings.Contains(data, "Content-Type: application/json") ||
-			strings.Contains(data, "content-type: application/json") {
+		if strings.Contains(strings.ToLower(data), "content-type: application/json") ||
+			strings.Contains(strings.ToLower(data), "content-type:application/json") {
 			var jsonData interface{}
 			if err := json.Unmarshal([]byte(bodyContent), &jsonData); err == nil {
 				// Pretty-print JSON
@@ -946,9 +1022,34 @@ func formatHTTPData(event *HTTPEvent) string {
 	return formatted.String()
 }
 
-// FormatHTTPData is the exported version of formatHTTPData
-func FormatHTTPData(event *HTTPEvent) string {
-	return formatHTTPData(event)
+// parseBodyAsJSON attempts to parse an HTTP event body as JSON
+func parseBodyAsJSON(event *HTTPEvent) interface{} {
+	if event == nil || event.DataLen == 0 {
+		return nil
+	}
+
+	// Get the HTTP data
+	data := string(event.Data[:event.DataLen])
+
+	// Find the body part (after empty line)
+	parts := strings.Split(data, "\r\n\r\n")
+	if len(parts) < 2 {
+		// Try with just newlines
+		parts = strings.Split(data, "\n\n")
+		if len(parts) < 2 {
+			return nil
+		}
+	}
+
+	bodyData := parts[1]
+
+	// Try to parse as JSON
+	var result interface{}
+	if err := json.Unmarshal([]byte(bodyData), &result); err == nil {
+		return result
+	}
+
+	return nil
 }
 
 // pollEvents reads events from the perf buffer
@@ -1094,7 +1195,7 @@ func (t *Tracer) pollEvents() {
 			}).Debug("Parsed HTTP data")
 
 			// Log the event
-			formattedData := formatHTTPData(&httpEvent)
+			formattedData := FormatHTTPData(&httpEvent)
 			t.logger.WithFields(logrus.Fields{
 				"type":         httpEvent.Type,
 				"pid":          httpEvent.PID,
@@ -1283,7 +1384,7 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 	connKey := fmt.Sprintf("%d:%d", event.PID, event.ConnID)
 
 	// Format the event data for human-readable output
-	formattedData := formatHTTPData(event)
+	formattedData := FormatHTTPData(event)
 
 	// If it's a request (write event)
 	if event.Type == EventTypeSSLWrite || event.Type == EventTypeSocketWrite {
@@ -1312,7 +1413,7 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 			tx.Duration = tx.EndTime.Sub(tx.StartTime)
 
 			// Format request and response data
-			reqFormatted := formatHTTPData(req)
+			reqFormatted := FormatHTTPData(req)
 			respFormatted := formattedData
 
 			// Log the complete transaction
@@ -1388,4 +1489,12 @@ func (t *Tracer) Close() error {
 // SetEventCallback sets the callback function for HTTP events
 func (t *Tracer) SetEventCallback(callback func(HTTPEvent)) {
 	t.eventCallback = callback
+}
+
+// Helper function to get response status code safely
+func getResponseStatusCode(response *HTTPEvent) int {
+	if response != nil {
+		return response.StatusCode
+	}
+	return 0
 }

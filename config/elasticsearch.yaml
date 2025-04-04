@@ -1,0 +1,13 @@
+# Elasticsearch configuration for ABProxy agent
+elasticsearch:
+  # Elasticsearch URL - using the existing service in the monitoring namespace
+  url: http://elasticsearch-service.monitoring.svc.cluster.local:9200
+  # Index prefix for HTTP transactions
+  index: abproxy
+  # Authentication credentials (optional)
+  # username: elastic
+  # password: changeme
+  # Maximum batch size for bulk operations
+  batch_size: 100
+  # Maximum time between batch flushes (in seconds)
+  flush_interval: 5

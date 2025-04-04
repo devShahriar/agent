@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-test-client
+  namespace: monitoring
+  labels:
+    app: go-test-client
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: go-test-client
+  template:
+    metadata:
+      labels:
+        app: go-test-client
+    spec:
+      containers:
+        - name: client
+          image: curlimages/curl:8.5.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              while true; do
+                # GET request
+                echo "Making GET request..."
+                curl -s -H "X-Custom-Header: uniquetest123" http://go-test-server:8080/get?param1=value1&param2=value2
+                sleep 5
+
+                # POST request with JSON body
+                echo "Making POST request..."
+                curl -s -X POST -H "Content-Type: application/json" -H "X-Custom-Header: uniquetest123" \
+                  -d '{"name":"test","value":"data"}' \
+                  http://go-test-server:8080/post
+                sleep 5
+
+                # PUT request
+                echo "Making PUT request..."
+                curl -s -X PUT -H "Content-Type: application/json" -H "X-Custom-Header: uniquetest123" \
+                  -d '{"name":"updated","value":"newdata"}' \
+                  http://go-test-server:8080/put
+                sleep 5
+
+                # Status code request
+                echo "Making status code request..."
+                curl -s http://go-test-server:8080/status/201
+                sleep 5
+
+                # Headers request
+                echo "Making headers request..."
+                curl -s -H "X-Test-Request-Header: test-value" -H "X-Custom-Header: uniquetest123" \
+                  http://go-test-server:8080/headers
+                sleep 5
+
+                # Delay request
+                echo "Making delay request..."
+                curl -s http://go-test-server:8080/delay/2
+                sleep 5
+
+                # Stream request
+                echo "Making stream request..."
+                curl -s http://go-test-server:8080/stream/3
+                sleep 15
+              done
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 50m
+              memory: 32Mi
