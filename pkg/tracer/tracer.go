@@ -386,7 +386,10 @@ func cleanupPinnedMaps(bpfDir string) {
 		"conn_state",
 		"process_info",
 		"active_fds",
+		"active_sockets",
+		"socket_info",
 		"event_storage",
+		"read_args_map",
 	}
 
 	for _, mapName := range maps {

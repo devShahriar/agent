@@ -155,6 +155,24 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } socket_info SEC(".maps") = {};
 
+// Architecture-independent register access
+#if defined(__TARGET_ARCH_x86)
+#define SYSCALL_GET_PARM1(x) ((x)->di)
+#define SYSCALL_GET_PARM2(x) ((x)->si)
+#define SYSCALL_GET_PARM3(x) ((x)->dx)
+#define SYSCALL_GET_RETURN(x) ((x)->ax)
+#elif defined(__TARGET_ARCH_arm64)
+#define SYSCALL_GET_PARM1(x) (((unsigned long *)(x))[0])
+#define SYSCALL_GET_PARM2(x) (((unsigned long *)(x))[1])
+#define SYSCALL_GET_PARM3(x) (((unsigned long *)(x))[2])
+#define SYSCALL_GET_RETURN(x) (((unsigned long *)(x))[0])
+#else
+#define SYSCALL_GET_PARM1(x) BPF_CORE_READ(x, args[0])
+#define SYSCALL_GET_PARM2(x) BPF_CORE_READ(x, args[1])
+#define SYSCALL_GET_PARM3(x) BPF_CORE_READ(x, args[2])
+#define SYSCALL_GET_RETURN(x) BPF_CORE_READ(x, args[0])
+#endif
+
 // Helper function to check if data looks like HTTP with improved detection
 static __always_inline int is_http_data(const char *data, size_t len) {
     bpf_printk("is_http_data: data length = %d", len);
@@ -246,8 +264,8 @@ static __always_inline int is_http_data(const char *data, size_t len) {
 SEC("kprobe/sys_accept4")
 int trace_accept4(struct pt_regs *ctx) {
     // Extract parameters
-    int sockfd = (int)PT_REGS_PARM1(ctx);
-    int ret_fd = (int)PT_REGS_RC(ctx);
+    int sockfd = (int)SYSCALL_GET_PARM1(ctx);
+    int ret_fd = (int)SYSCALL_GET_RETURN(ctx);
     
     // Skip invalid file descriptors
     if (ret_fd < 0) {
@@ -283,7 +301,7 @@ int trace_accept4(struct pt_regs *ctx) {
 SEC("kprobe/sys_connect")
 int trace_connect(struct pt_regs *ctx) {
     // Extract parameters
-    int sockfd = (int)PT_REGS_PARM1(ctx);
+    int sockfd = (int)SYSCALL_GET_PARM1(ctx);
     
     // Skip invalid file descriptors
     if (sockfd < 0) {
@@ -319,9 +337,9 @@ int trace_connect(struct pt_regs *ctx) {
 SEC("kprobe/sys_write")
 int trace_write(struct pt_regs *ctx) {
     // Extract parameters
-    int fd = (int)PT_REGS_PARM1(ctx);
-    char *buf = (char *)PT_REGS_PARM2(ctx);
-    size_t len = (size_t)PT_REGS_PARM3(ctx);
+    int fd = (int)SYSCALL_GET_PARM1(ctx);
+    char *buf = (char *)SYSCALL_GET_PARM2(ctx);
+    size_t len = (size_t)SYSCALL_GET_PARM3(ctx);
     
     // Get current PID and create key
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -382,9 +400,9 @@ int trace_write(struct pt_regs *ctx) {
 SEC("kprobe/sys_read")
 int trace_read(struct pt_regs *ctx) {
     // Extract parameters before the syscall executes
-    int fd = (int)PT_REGS_PARM1(ctx);
-    char *buf = (char *)PT_REGS_PARM2(ctx);
-    size_t len = (size_t)PT_REGS_PARM3(ctx);
+    int fd = (int)SYSCALL_GET_PARM1(ctx);
+    char *buf = (char *)SYSCALL_GET_PARM2(ctx);
+    size_t len = (size_t)SYSCALL_GET_PARM3(ctx);
     
     // Get current PID and create key
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -421,7 +439,7 @@ int trace_read(struct pt_regs *ctx) {
 SEC("kretprobe/sys_read")
 int trace_read_ret(struct pt_regs *ctx) {
     // Get the return value (bytes read)
-    ssize_t bytes_read = PT_REGS_RC(ctx);
+    size_t bytes_read = (size_t)SYSCALL_GET_RETURN(ctx);
     __u64 id = bpf_get_current_pid_tgid();
     
     // Retrieve the stored args
@@ -477,7 +495,7 @@ int trace_read_ret(struct pt_regs *ctx) {
 // Trace close syscall - Remove from active sockets
 SEC("kprobe/sys_close")
 int trace_close(struct pt_regs *ctx) {
-    int fd = (int)PT_REGS_PARM1(ctx);
+    int fd = (int)SYSCALL_GET_PARM1(ctx);
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     
     struct socket_key key = {
