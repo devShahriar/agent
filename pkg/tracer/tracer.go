@@ -655,6 +655,8 @@ func parseHTTPData(event *HTTPEvent) {
 
 // pollEvents reads events from the perf buffer
 func (t *Tracer) pollEvents() {
+	var httpEvent HTTPEvent
+
 	for {
 		select {
 		case <-t.stopChan:
@@ -672,59 +674,88 @@ func (t *Tracer) pollEvents() {
 
 			t.logger.WithField("record", record).Debug("Received perf event")
 
-			// Parse the event
-			var event HTTPEvent
-			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
-				t.logger.WithError(err).Error("Error parsing event")
+			// Create a temp struct that matches the BPF binary format
+			type bpfEvent struct {
+				PID       uint32
+				TID       uint32
+				Timestamp uint64
+				FD        uint32
+				Type      uint8
+				DataLen   uint32
+				Data      [256]byte
+			}
+
+			var bpfData bpfEvent
+
+			// Parse the event using the correct struct
+			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &bpfData); err != nil {
+				t.logger.WithError(err).Error("Error parsing raw event")
 				continue
 			}
 
+			// Convert to our HTTPEvent struct
+			httpEvent.PID = bpfData.PID
+			httpEvent.TID = bpfData.TID
+			httpEvent.Timestamp = bpfData.Timestamp
+			httpEvent.ConnID = bpfData.FD
+			httpEvent.Type = bpfData.Type
+			httpEvent.DataLen = bpfData.DataLen
+			copy(httpEvent.Data[:], bpfData.Data[:])
+
 			t.logger.WithFields(logrus.Fields{
-				"pid":     event.PID,
-				"tid":     event.TID,
-				"type":    event.Type,
-				"conn_id": event.ConnID,
+				"pid":      httpEvent.PID,
+				"tid":      httpEvent.TID,
+				"type":     httpEvent.Type,
+				"conn_id":  httpEvent.ConnID,
+				"data_len": httpEvent.DataLen,
 			}).Debug("Parsed HTTP event")
 
 			// Get process info
-			name, cmdLine := t.getProcessInfo(event.PID)
-			event.ProcessName = name
-			event.Command = cmdLine
+			name, cmdLine := t.getProcessInfo(httpEvent.PID)
+			httpEvent.ProcessName = name
+			httpEvent.Command = cmdLine
 
 			t.logger.WithFields(logrus.Fields{
-				"pid":          event.PID,
-				"process_name": event.ProcessName,
-				"command":      event.Command,
+				"pid":          httpEvent.PID,
+				"process_name": httpEvent.ProcessName,
+				"command":      httpEvent.Command,
 			}).Debug("Retrieved process info")
 
 			// Parse HTTP data
-			parseHTTPData(&event)
+			parseHTTPData(&httpEvent)
 
 			t.logger.WithFields(logrus.Fields{
-				"pid":         event.PID,
-				"method":      event.Method,
-				"url":         event.URL,
-				"status_code": event.StatusCode,
+				"pid":         httpEvent.PID,
+				"method":      httpEvent.Method,
+				"url":         httpEvent.URL,
+				"status_code": httpEvent.StatusCode,
 			}).Debug("Parsed HTTP data")
 
 			// Log the event
 			t.logger.WithFields(logrus.Fields{
-				"type":         event.Type,
-				"pid":          event.PID,
-				"tid":          event.TID,
-				"process_name": event.ProcessName,
-				"command":      event.Command,
-				"method":       event.Method,
-				"url":          event.URL,
-				"status_code":  event.StatusCode,
-				"content_type": event.ContentType,
-				"data_len":     event.DataLen,
-				"data":         string(event.Data[:event.DataLen]),
+				"type":         httpEvent.Type,
+				"pid":          httpEvent.PID,
+				"tid":          httpEvent.TID,
+				"process_name": httpEvent.ProcessName,
+				"command":      httpEvent.Command,
+				"method":       httpEvent.Method,
+				"url":          httpEvent.URL,
+				"status_code":  httpEvent.StatusCode,
+				"content_type": httpEvent.ContentType,
+				"data_len":     httpEvent.DataLen,
+				"data":         string(httpEvent.Data[:httpEvent.DataLen]),
 			}).Info("HTTP event received")
+
+			// Store the event if storage is available
+			if t.storage != nil {
+				if err := t.storage.Store(httpEvent); err != nil {
+					t.logger.WithError(err).Error("Failed to store HTTP event")
+				}
+			}
 
 			// Call the callback if set
 			if t.eventCallback != nil {
-				t.eventCallback(event)
+				t.eventCallback(httpEvent)
 			}
 		}
 	}
