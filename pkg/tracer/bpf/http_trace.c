@@ -111,12 +111,19 @@ static __always_inline int is_http_data(const char *data, size_t len) {
     // Log the first few bytes for debugging
     if (len >= 4) {
         unsigned char b1 = data[0], b2 = data[1], b3 = data[2], b4 = data[3];
-        bpf_printk("First 4 bytes from %s: %02x %02x %02x %02x", comm, b1, b2, b3, b4);
-        bpf_printk("First 4 chars from %s: %c%c%c%c", comm, 
-            (b1 >= 32 && b1 <= 126) ? b1 : '.',
-            (b2 >= 32 && b2 <= 126) ? b2 : '.',
-            (b3 >= 32 && b3 <= 126) ? b3 : '.',
-            (b4 >= 32 && b4 <= 126) ? b4 : '.');
+        // Split the logging into multiple calls
+        bpf_printk("Process: %s", comm);
+        bpf_printk("Bytes: %02x %02x", b1, b2);
+        bpf_printk("Bytes: %02x %02x", b3, b4);
+        
+        // Split character logging
+        char c1 = (b1 >= 32 && b1 <= 126) ? b1 : '.';
+        char c2 = (b2 >= 32 && b2 <= 126) ? b2 : '.';
+        bpf_printk("Chars: %c%c", c1, c2);
+        
+        char c3 = (b3 >= 32 && b3 <= 126) ? b3 : '.';
+        char c4 = (b4 >= 32 && b4 <= 126) ? b4 : '.';
+        bpf_printk("Chars: %c%c", c3, c4);
     }
     
     // Check for HTTP methods (common methods first)
@@ -264,8 +271,9 @@ int trace_tcp_recv(struct pt_regs *ctx) {
 
         // Log the first few bytes for debugging
         if (len >= 4) {
-            bpf_printk("TCP recv data: %c%c%c%c", 
-                event.data[0], event.data[1], event.data[2], event.data[3]);
+            // Split the logging into two calls
+            bpf_printk("TCP recv data (1/2): %c%c", event.data[0], event.data[1]);
+            bpf_printk("TCP recv data (2/2): %c%c", event.data[2], event.data[3]);
         }
 
         // Check if it's HTTP
@@ -316,8 +324,9 @@ int trace_tcp_send(struct pt_regs *ctx) {
 
         // Log the first few bytes for debugging
         if (len >= 4) {
-            bpf_printk("TCP send data: %c%c%c%c", 
-                event.data[0], event.data[1], event.data[2], event.data[3]);
+            // Split the logging into two calls
+            bpf_printk("TCP send data (1/2): %c%c", event.data[0], event.data[1]);
+            bpf_printk("TCP send data (2/2): %c%c", event.data[2], event.data[3]);
         }
 
         // Check if it's HTTP
