@@ -41,6 +41,14 @@ typedef struct {
     char data[MAX_MSG_SIZE];
 } __attribute__((packed)) http_event_t;
 
+// Connection state structure
+struct conn_state {
+    __u32 pid;
+    __u32 tid;
+    __u64 start_time;
+    __u8 is_active;
+} __attribute__((packed));
+
 // Map to store events
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
@@ -62,7 +70,7 @@ struct {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(__u32));
+    __uint(value_size, sizeof(struct conn_state));
     __uint(max_entries, 1024);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } conn_state SEC(".maps") = {};
@@ -86,62 +94,58 @@ struct {
 } active_fds SEC(".maps") = {};
 
 // Event types
-#define EVENT_TYPE_SSL_READ  1
-#define EVENT_TYPE_SSL_WRITE 2
-#define EVENT_TYPE_SOCKET_READ  3
-#define EVENT_TYPE_SOCKET_WRITE 4
-#define EVENT_TYPE_CONNECT 5
-#define EVENT_TYPE_CLOSE 6
+#define EVENT_TYPE_SSL_READ    1  // Response
+#define EVENT_TYPE_SSL_WRITE   2  // Request
+#define EVENT_TYPE_SOCKET_READ 3  // Response
+#define EVENT_TYPE_SOCKET_WRITE 4 // Request
+#define EVENT_TYPE_CONNECT     5  // New connection
+#define EVENT_TYPE_CLOSE       6  // Connection closed
+#define EVENT_TYPE_HTTP_GET    7  // HTTP GET request
+#define EVENT_TYPE_HTTP_POST   8  // HTTP POST request
+#define EVENT_TYPE_HTTP_PUT    9  // HTTP PUT request
+#define EVENT_TYPE_HTTP_DELETE 10 // HTTP DELETE request
+#define EVENT_TYPE_HTTP_RESP   11 // HTTP response
 
 // Helper function to check if data looks like HTTP
 static __always_inline int is_http_data(const char *data, size_t len) {
     if (len < 4) {
-        bpf_printk("Data too short for HTTP: %d bytes", len);
         return 0;
     }
     
-    // Get process name for debugging
-    char comm[16];
-    bpf_get_current_comm(&comm, sizeof(comm));
-    
-    // Log the first few bytes for debugging
-    if (len >= 4) {
-        unsigned char b1 = data[0], b2 = data[1], b3 = data[2], b4 = data[3];
-        // Split the logging into multiple calls
-        bpf_printk("Process: %s", comm);
-        bpf_printk("Bytes: %02x %02x", b1, b2);
-        bpf_printk("Bytes: %02x %02x", b3, b4);
-        
-        // Split character logging
-        char c1 = (b1 >= 32 && b1 <= 126) ? b1 : '.';
-        char c2 = (b2 >= 32 && b2 <= 126) ? b2 : '.';
-        bpf_printk("Chars: %c%c", c1, c2);
-        
-        char c3 = (b3 >= 32 && b3 <= 126) ? b3 : '.';
-        char c4 = (b4 >= 32 && b4 <= 126) ? b4 : '.';
-        bpf_printk("Chars: %c%c", c3, c4);
-    }
-    
-    // Check for HTTP methods (common methods first)
+    // Check for HTTP methods (GET, POST, PUT, DELETE, etc.)
     if (len >= 4) {
         // GET request
         if (data[0] == 'G' && data[1] == 'E' && data[2] == 'T' && data[3] == ' ') {
-            bpf_printk("HTTP GET request from %s", comm);
             return 1;
         }
         // POST request
         if (data[0] == 'P' && data[1] == 'O' && data[2] == 'S' && data[3] == 'T') {
-            bpf_printk("HTTP POST request from %s", comm);
+            return 1;
+        }
+        // PUT request
+        if (data[0] == 'P' && data[1] == 'U' && data[2] == 'T' && data[3] == ' ') {
+            return 1;
+        }
+        // DELETE request
+        if (data[0] == 'D' && data[1] == 'E' && data[2] == 'L' && data[3] == 'E') {
             return 1;
         }
         // HTTP response
         if (data[0] == 'H' && data[1] == 'T' && data[2] == 'T' && data[3] == 'P') {
-            bpf_printk("HTTP response from %s", comm);
             return 1;
         }
-        // JSON response (common for APIs)
-        if (data[0] == '{') {
-            bpf_printk("JSON response from %s", comm);
+    }
+    
+    // Check for common HTTP headers
+    if (len >= 6) {
+        // Content-Type
+        if (data[0] == 'C' && data[1] == 'o' && data[2] == 'n' && 
+            data[3] == 't' && data[4] == 'e' && data[5] == 'n') {
+            return 1;
+        }
+        // Host header
+        if (data[0] == 'H' && data[1] == 'o' && data[2] == 's' && 
+            data[3] == 't' && data[4] == ':' && data[5] == ' ') {
             return 1;
         }
     }
@@ -168,13 +172,14 @@ int trace_accept4(struct pt_regs *ctx) {
     event->conn_id = sockfd;
     event->data_len = 0;
 
-    // Get process name for debugging
-    char comm[16];
-    bpf_get_current_comm(&comm, sizeof(comm));
-    
-    // Debug log
-    bpf_printk("accept4 from %s", comm);
-    bpf_printk("pid=%d sockfd=%d", event->pid, sockfd);
+    // Store connection state
+    struct conn_state state = {
+        .pid = event->pid,
+        .tid = event->tid,
+        .start_time = event->timestamp,
+        .is_active = 1
+    };
+    bpf_map_update_elem(&conn_state, &sockfd, &state, BPF_ANY);
 
     // Store the file descriptor as active
     _Bool t = 1;
@@ -328,14 +333,10 @@ int trace_close(struct pt_regs *ctx) {
         return 0;
     }
     
-    // Get process name for debugging
-    char comm[16];
-    bpf_get_current_comm(&comm, sizeof(comm));
+    // Remove connection state
+    bpf_map_delete_elem(&conn_state, &fd);
     
-    // Debug log
-    bpf_printk("close from %s (fd=%d)", comm, fd);
-
-    // Remove the file descriptor from active list
+    // Remove from active file descriptors
     bpf_map_delete_elem(&active_fds, &fd);
 
     return 0;
