@@ -4,6 +4,14 @@
 #define CORE_DISABLE_VDSO_LOOKUP 1
 #define HAVE_NO_VDSO 1
 
+// Platform-specific includes
+#ifdef __APPLE__
+// macOS-specific headers - minimal set for eBPF
+#include <stddef.h>
+#include <stdint.h>
+
+#else
+// Linux headers
 #include <linux/bpf.h>
 #include <linux/ptrace.h>
 #include <linux/types.h>
@@ -15,6 +23,7 @@
 #include <bpf/bpf_core_read.h>
 #include <stddef.h>  // For size_t
 #include <stdint.h>
+#endif
 
 #ifdef asm_inline
 #undef asm_inline
