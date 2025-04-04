@@ -55,6 +55,17 @@ type HTTPEvent struct {
 	ContentType string
 }
 
+// HTTPTransaction represents a complete HTTP transaction with request and response
+type HTTPTransaction struct {
+	Request     *HTTPEvent
+	Response    *HTTPEvent
+	StartTime   time.Time
+	EndTime     time.Time
+	Duration    time.Duration
+	ProcessName string
+	Command     string
+}
+
 // Clone returns a copy of the HTTPEvent
 func (e *HTTPEvent) Clone() *HTTPEvent {
 	clone := *e // Shallow copy
@@ -64,6 +75,7 @@ func (e *HTTPEvent) Clone() *HTTPEvent {
 // Storage interface for storing HTTP events
 type Storage interface {
 	Store(event HTTPEvent) error
+	StoreTransaction(transaction HTTPTransaction) error
 	Close() error
 }
 
@@ -122,6 +134,69 @@ func (s *FileStorage) Store(event HTTPEvent) error {
 	}
 
 	s.logger.WithField("filename", filename).Debug("Stored HTTP event")
+	return nil
+}
+
+// StoreTransaction implements Storage interface
+func (s *FileStorage) StoreTransaction(transaction HTTPTransaction) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Format request and response data for human-readable storage
+	requestFormatted := formatHTTPData(transaction.Request)
+	var responseFormatted string
+	if transaction.Response != nil {
+		responseFormatted = formatHTTPData(transaction.Response)
+	}
+
+	// Create a filename based on timestamp and PID
+	filename := fmt.Sprintf("%s/http_tx_%s_%d_%d.json",
+		s.dir,
+		transaction.ProcessName,
+		transaction.Request.PID,
+		transaction.Request.Timestamp)
+
+	// Create the document
+	doc := map[string]interface{}{
+		"start_time":   transaction.StartTime,
+		"end_time":     transaction.EndTime,
+		"duration_ms":  transaction.Duration.Milliseconds(),
+		"process_name": transaction.ProcessName,
+		"command":      transaction.Command,
+		"request": map[string]interface{}{
+			"method": transaction.Request.Method,
+			"url":    transaction.Request.URL,
+			"raw_data": string(
+				transaction.Request.Data[:transaction.Request.DataLen],
+			),
+			"formatted_data": requestFormatted,
+		},
+	}
+
+	// Add response if available
+	if transaction.Response != nil {
+		doc["response"] = map[string]interface{}{
+			"status_code":  transaction.Response.StatusCode,
+			"content_type": transaction.Response.ContentType,
+			"raw_data": string(
+				transaction.Response.Data[:transaction.Response.DataLen],
+			),
+			"formatted_data": responseFormatted,
+		}
+	}
+
+	// Marshal the document to JSON
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal transaction document: %w", err)
+	}
+
+	// Write the file
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		return fmt.Errorf("failed to write transaction file: %w", err)
+	}
+
+	s.logger.WithField("filename", filename).Debug("Stored HTTP transaction")
 	return nil
 }
 
@@ -219,6 +294,77 @@ func (s *ElasticsearchStorage) Store(event HTTPEvent) error {
 	return nil
 }
 
+// StoreTransaction implements Storage interface
+func (s *ElasticsearchStorage) StoreTransaction(transaction HTTPTransaction) error {
+	// Format request and response data for human-readable storage
+	requestFormatted := formatHTTPData(transaction.Request)
+	var responseFormatted string
+	if transaction.Response != nil {
+		responseFormatted = formatHTTPData(transaction.Response)
+	}
+
+	// Create the document
+	doc := map[string]interface{}{
+		"start_time":   transaction.StartTime,
+		"end_time":     transaction.EndTime,
+		"duration_ms":  transaction.Duration.Milliseconds(),
+		"process_name": transaction.ProcessName,
+		"command":      transaction.Command,
+		"request": map[string]interface{}{
+			"method": transaction.Request.Method,
+			"url":    transaction.Request.URL,
+			"raw_data": string(
+				transaction.Request.Data[:transaction.Request.DataLen],
+			),
+			"formatted_data": requestFormatted,
+		},
+	}
+
+	// Add response if available
+	if transaction.Response != nil {
+		doc["response"] = map[string]interface{}{
+			"status_code":  transaction.Response.StatusCode,
+			"content_type": transaction.Response.ContentType,
+			"raw_data": string(
+				transaction.Response.Data[:transaction.Response.DataLen],
+			),
+			"formatted_data": responseFormatted,
+		}
+	}
+
+	// Marshal the document to JSON
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("failed to marshal transaction document: %w", err)
+	}
+
+	// Create the index request
+	req := esapi.IndexRequest{
+		Index: fmt.Sprintf("%s-transactions", s.index),
+		DocumentID: fmt.Sprintf(
+			"%d-%d-%d",
+			transaction.Request.PID,
+			transaction.Request.TID,
+			transaction.Request.Timestamp,
+		),
+		Body:    bytes.NewReader(data),
+		Refresh: "true",
+	}
+
+	// Perform the request
+	res, err := req.Do(context.Background(), s.client)
+	if err != nil {
+		return fmt.Errorf("failed to index transaction document: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		return fmt.Errorf("error indexing transaction document: %s", res.String())
+	}
+
+	return nil
+}
+
 // Close implements Storage interface
 func (s *ElasticsearchStorage) Close() error {
 	// The Elasticsearch client doesn't need explicit closing
@@ -237,7 +383,7 @@ type Tracer struct {
 
 	// Connection context to correlate requests and responses
 	connMu      sync.RWMutex
-	connections map[uint32]*HTTPEvent
+	connections map[string]*HTTPEvent
 
 	// Process info cache to avoid repeated lookups
 	procMu    sync.RWMutex
@@ -299,7 +445,7 @@ func NewTracer(
 		eventCallback: callback,
 		stopChan:      make(chan struct{}),
 		uprobes:       make([]link.Link, 0),
-		connections:   make(map[uint32]*HTTPEvent),
+		connections:   make(map[string]*HTTPEvent),
 		procCache:     make(map[uint32]processInfo),
 	}
 
@@ -633,20 +779,39 @@ func parseHTTPData(event *HTTPEvent) {
 
 	// Parse request line or status line
 	firstLine := lines[0]
+	headers := make(map[string]string)
+
+	// Find the empty line that separates headers from body
+	bodyStart := -1
+	for i, line := range lines {
+		if line == "" && i < len(lines)-1 {
+			bodyStart = i + 1
+			break
+		}
+	}
+
+	// Parse headers
+	for i := 1; i < len(lines) && (bodyStart == -1 || i < bodyStart); i++ {
+		if lines[i] == "" {
+			continue
+		}
+		parts := strings.SplitN(lines[i], ":", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			headers[key] = value
+		}
+	}
+
 	if strings.HasPrefix(firstLine, "HTTP/") {
 		// This is a response
 		parts := strings.Split(firstLine, " ")
 		if len(parts) >= 2 {
 			event.StatusCode, _ = strconv.Atoi(parts[1])
 		}
-		// Look for Content-Type header
-		for _, line := range lines[1:] {
-			if strings.HasPrefix(line, "Content-Type:") {
-				event.ContentType = strings.TrimSpace(
-					strings.TrimPrefix(line, "Content-Type:"),
-				)
-				break
-			}
+		// Get Content-Type header
+		if contentType, ok := headers["Content-Type"]; ok {
+			event.ContentType = contentType
 		}
 	} else {
 		// This is a request
@@ -656,6 +821,62 @@ func parseHTTPData(event *HTTPEvent) {
 			event.URL = parts[1]
 		}
 	}
+}
+
+// formatHTTPData returns a human-readable formatted version of HTTP data
+func formatHTTPData(event *HTTPEvent) string {
+	if event.DataLen == 0 {
+		return ""
+	}
+
+	data := string(event.Data[:event.DataLen])
+	lines := strings.Split(data, "\r\n")
+	if len(lines) == 0 {
+		return ""
+	}
+
+	// Format headers and body with proper indentation
+	var formatted strings.Builder
+
+	// Add first line (request/status line)
+	formatted.WriteString(lines[0])
+	formatted.WriteString("\n")
+
+	// Add headers
+	inHeaders := true
+	for i := 1; i < len(lines); i++ {
+		if lines[i] == "" {
+			inHeaders = false
+			formatted.WriteString("\n")
+			continue
+		}
+
+		if inHeaders {
+			formatted.WriteString("  ")
+			formatted.WriteString(lines[i])
+			formatted.WriteString("\n")
+		} else {
+			// Try to pretty-print JSON body
+			if i == len(lines)-1 && strings.Contains(data, "Content-Type: application/json") {
+				var jsonData interface{}
+				if err := json.Unmarshal([]byte(lines[i]), &jsonData); err == nil {
+					// Pretty-print JSON
+					prettyJSON, err := json.MarshalIndent(jsonData, "  ", "  ")
+					if err == nil {
+						formatted.WriteString("  ")
+						formatted.WriteString(string(prettyJSON))
+						break
+					}
+				}
+			}
+			// Regular body formatting
+			formatted.WriteString("  ")
+			formatted.WriteString(lines[i])
+			formatted.WriteString("\n")
+		}
+	}
+
+	return formatted.String()
 }
 
 // pollEvents reads events from the perf buffer
@@ -735,11 +956,19 @@ func (t *Tracer) pollEvents() {
 			// Skip CoreDNS events - ignore all events from the CoreDNS process
 			if httpEvent.ProcessName == "coredns" ||
 				strings.Contains(strings.ToLower(httpEvent.Command), "coredns") {
-				t.logger.WithFields(logrus.Fields{
-					"pid":          httpEvent.PID,
-					"process_name": httpEvent.ProcessName,
-				}).Debug("Skipping CoreDNS event")
-				continue
+				// Skip only if it's CoreDNS
+				if !strings.Contains(
+					strings.ToLower(httpEvent.ProcessName),
+					"gunicorn",
+				) &&
+					!strings.Contains(strings.ToLower(httpEvent.ProcessName), "python") &&
+					!strings.Contains(strings.ToLower(httpEvent.Command), "httpbin") {
+					t.logger.WithFields(logrus.Fields{
+						"pid":          httpEvent.PID,
+						"process_name": httpEvent.ProcessName,
+					}).Debug("Skipping CoreDNS event")
+					continue
+				}
 			}
 
 			t.logger.WithFields(logrus.Fields{
@@ -773,6 +1002,10 @@ func (t *Tracer) pollEvents() {
 				"data":         string(httpEvent.Data[:httpEvent.DataLen]),
 			}).Info("HTTP event received")
 
+			// Handle the event - track request and response pairs
+			eventCopy := httpEvent.Clone()
+			t.handleHTTPEvent(eventCopy)
+
 			// Store the event if storage is available
 			if t.storage != nil {
 				if err := t.storage.Store(httpEvent); err != nil {
@@ -784,6 +1017,86 @@ func (t *Tracer) pollEvents() {
 			if t.eventCallback != nil {
 				t.eventCallback(httpEvent)
 			}
+		}
+	}
+}
+
+// handleHTTPEvent processes an HTTP event to track transactions
+func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
+	t.connMu.Lock()
+	defer t.connMu.Unlock()
+
+	// Create connection key from process ID and connection ID
+	connKey := fmt.Sprintf("%d:%d", event.PID, event.ConnID)
+
+	// Format the event data for human-readable output
+	formattedData := formatHTTPData(event)
+
+	// If it's a request (write event)
+	if event.Type == EventTypeSSLWrite || event.Type == EventTypeSocketWrite {
+		// Store the request in the connection map
+		t.connections[connKey] = event
+		t.logger.WithFields(logrus.Fields{
+			"conn_key": connKey,
+			"method":   event.Method,
+			"url":      event.URL,
+			"data":     formattedData,
+		}).Debug("Stored HTTP request")
+	} else if event.Type == EventTypeSSLRead || event.Type == EventTypeSocketRead {
+		// It's a response - look for the matching request
+		if req, ok := t.connections[connKey]; ok {
+			// We found a matching request, create a transaction
+			tx := HTTPTransaction{
+				Request:     req,
+				Response:    event,
+				StartTime:   time.Unix(0, int64(req.Timestamp)),
+				EndTime:     time.Unix(0, int64(event.Timestamp)),
+				ProcessName: event.ProcessName,
+				Command:     event.Command,
+			}
+			tx.Duration = tx.EndTime.Sub(tx.StartTime)
+
+			// Format request and response data
+			reqFormatted := formatHTTPData(req)
+			respFormatted := formattedData
+
+			// Log the complete transaction with better formatting
+			t.logger.WithFields(logrus.Fields{
+				"method":      req.Method,
+				"url":         req.URL,
+				"status_code": event.StatusCode,
+				"duration_ms": tx.Duration.Milliseconds(),
+				"process":     tx.ProcessName,
+				"request":     reqFormatted,
+				"response":    respFormatted,
+			}).Info("HTTP Transaction completed")
+
+			// Store the transaction
+			if t.storage != nil {
+				if err := t.storage.StoreTransaction(tx); err != nil {
+					t.logger.WithError(err).Error("Failed to store HTTP transaction")
+				}
+			}
+
+			// Remove the request from the map
+			delete(t.connections, connKey)
+		} else {
+			// We got a response without a matching request
+			t.logger.WithFields(logrus.Fields{
+				"conn_key":    connKey,
+				"status_code": event.StatusCode,
+				"data":        formattedData,
+			}).Debug("Received orphaned HTTP response")
+		}
+	}
+
+	// Cleanup old requests (incomplete transactions)
+	now := time.Now().UnixNano()
+	for key, req := range t.connections {
+		// If request is older than 30 seconds, remove it
+		if now-int64(req.Timestamp) > 30*int64(time.Second) {
+			t.logger.WithField("conn_key", key).Debug("Removing stale HTTP request")
+			delete(t.connections, key)
 		}
 	}
 }
