@@ -498,63 +498,85 @@ func (t *Tracer) Start() error {
 		}
 	}
 
-	// Attach syscall probes
+	// Attach syscall tracepoints
 	if t.objs != nil {
-		// Attach accept4 kprobe
-		kp, err := link.Kprobe("sys_accept4", t.objs.TraceAccept4, nil)
+		// Attach accept4 tracepoints
+		tp, err := link.Tracepoint(
+			"syscalls",
+			"sys_enter_accept4",
+			t.objs.TraceAccept4,
+			nil,
+		)
 		if err != nil {
-			t.logger.WithError(err).Error("Failed to attach sys_accept4 kprobe")
+			t.logger.WithError(err).Error("Failed to attach sys_enter_accept4 tracepoint")
 		} else {
-			t.uprobes = append(t.uprobes, kp)
-			t.logger.Info("Successfully attached sys_accept4 kprobe")
+			t.uprobes = append(t.uprobes, tp)
+			t.logger.Info("Successfully attached sys_enter_accept4 tracepoint")
 		}
 
-		// Attach connect kprobe
-		kp, err = link.Kprobe("sys_connect", t.objs.TraceConnect, nil)
+		tp, err = link.Tracepoint(
+			"syscalls",
+			"sys_exit_accept4",
+			t.objs.TraceAccept4Exit,
+			nil,
+		)
 		if err != nil {
-			t.logger.WithError(err).Error("Failed to attach sys_connect kprobe")
+			t.logger.WithError(err).Error("Failed to attach sys_exit_accept4 tracepoint")
 		} else {
-			t.uprobes = append(t.uprobes, kp)
-			t.logger.Info("Successfully attached sys_connect kprobe")
+			t.uprobes = append(t.uprobes, tp)
+			t.logger.Info("Successfully attached sys_exit_accept4 tracepoint")
 		}
 
-		// Attach write kprobe
-		kp, err = link.Kprobe("sys_write", t.objs.TraceWrite, nil)
+		// Attach connect tracepoint
+		tp, err = link.Tracepoint(
+			"syscalls",
+			"sys_enter_connect",
+			t.objs.TraceConnect,
+			nil,
+		)
 		if err != nil {
-			t.logger.WithError(err).Error("Failed to attach sys_write kprobe")
+			t.logger.WithError(err).Error("Failed to attach sys_enter_connect tracepoint")
 		} else {
-			t.uprobes = append(t.uprobes, kp)
-			t.logger.Info("Successfully attached sys_write kprobe")
+			t.uprobes = append(t.uprobes, tp)
+			t.logger.Info("Successfully attached sys_enter_connect tracepoint")
 		}
 
-		// Attach read kprobe
-		kp, err = link.Kprobe("sys_read", t.objs.TraceRead, nil)
+		// Attach write tracepoint
+		tp, err = link.Tracepoint("syscalls", "sys_enter_write", t.objs.TraceWrite, nil)
 		if err != nil {
-			t.logger.WithError(err).Error("Failed to attach sys_read kprobe")
+			t.logger.WithError(err).Error("Failed to attach sys_enter_write tracepoint")
 		} else {
-			t.uprobes = append(t.uprobes, kp)
-			t.logger.Info("Successfully attached sys_read kprobe")
+			t.uprobes = append(t.uprobes, tp)
+			t.logger.Info("Successfully attached sys_enter_write tracepoint")
 		}
 
-		// Attach read return probe
-		kp, err = link.Kretprobe("sys_read", t.objs.TraceReadRet, nil)
+		// Attach read tracepoints
+		tp, err = link.Tracepoint("syscalls", "sys_enter_read", t.objs.TraceRead, nil)
 		if err != nil {
-			t.logger.WithError(err).Error("Failed to attach sys_read kretprobe")
+			t.logger.WithError(err).Error("Failed to attach sys_enter_read tracepoint")
 		} else {
-			t.uprobes = append(t.uprobes, kp)
-			t.logger.Info("Successfully attached sys_read kretprobe")
+			t.uprobes = append(t.uprobes, tp)
+			t.logger.Info("Successfully attached sys_enter_read tracepoint")
 		}
 
-		// Attach close kprobe
-		kp, err = link.Kprobe("sys_close", t.objs.TraceClose, nil)
+		tp, err = link.Tracepoint("syscalls", "sys_exit_read", t.objs.TraceReadRet, nil)
 		if err != nil {
-			t.logger.WithError(err).Error("Failed to attach sys_close kprobe")
+			t.logger.WithError(err).Error("Failed to attach sys_exit_read tracepoint")
 		} else {
-			t.uprobes = append(t.uprobes, kp)
-			t.logger.Info("Successfully attached sys_close kprobe")
+			t.uprobes = append(t.uprobes, tp)
+			t.logger.Info("Successfully attached sys_exit_read tracepoint")
+		}
+
+		// Attach close tracepoint
+		tp, err = link.Tracepoint("syscalls", "sys_enter_close", t.objs.TraceClose, nil)
+		if err != nil {
+			t.logger.WithError(err).Error("Failed to attach sys_enter_close tracepoint")
+		} else {
+			t.uprobes = append(t.uprobes, tp)
+			t.logger.Info("Successfully attached sys_enter_close tracepoint")
 		}
 	} else {
-		t.logger.Error("BPF objects not loaded, cannot attach kprobes")
+		t.logger.Error("BPF objects not loaded, cannot attach tracepoints")
 	}
 
 	// Start polling for events

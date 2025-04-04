@@ -14,6 +14,7 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 #include <stddef.h>  // For size_t
+#include <stdint.h>
 
 #ifdef asm_inline
 #undef asm_inline
@@ -155,24 +156,6 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } socket_info SEC(".maps") = {};
 
-// Architecture-independent register access
-#if defined(__TARGET_ARCH_x86)
-#define SYSCALL_GET_PARM1(x) ((x)->di)
-#define SYSCALL_GET_PARM2(x) ((x)->si)
-#define SYSCALL_GET_PARM3(x) ((x)->dx)
-#define SYSCALL_GET_RETURN(x) ((x)->ax)
-#elif defined(__TARGET_ARCH_arm64)
-#define SYSCALL_GET_PARM1(x) (((unsigned long *)(x))[0])
-#define SYSCALL_GET_PARM2(x) (((unsigned long *)(x))[1])
-#define SYSCALL_GET_PARM3(x) (((unsigned long *)(x))[2])
-#define SYSCALL_GET_RETURN(x) (((unsigned long *)(x))[0])
-#else
-#define SYSCALL_GET_PARM1(x) BPF_CORE_READ(x, args[0])
-#define SYSCALL_GET_PARM2(x) BPF_CORE_READ(x, args[1])
-#define SYSCALL_GET_PARM3(x) BPF_CORE_READ(x, args[2])
-#define SYSCALL_GET_RETURN(x) BPF_CORE_READ(x, args[0])
-#endif
-
 // Helper function to check if data looks like HTTP with improved detection
 static __always_inline int is_http_data(const char *data, size_t len) {
     bpf_printk("is_http_data: data length = %d", len);
@@ -261,22 +244,33 @@ static __always_inline int is_http_data(const char *data, size_t len) {
 }
 
 // Trace accept4 syscall - Mark socket as active
-SEC("kprobe/sys_accept4")
-int trace_accept4(struct pt_regs *ctx) {
+SEC("tracepoint/syscalls/sys_enter_accept4")
+int trace_accept4(struct trace_event_raw_sys_enter *ctx) {
     // Extract parameters
-    int sockfd = (int)SYSCALL_GET_PARM1(ctx);
-    int ret_fd = (int)SYSCALL_GET_RETURN(ctx);
+    int sockfd = ctx->args[0];
+    // Return value only available in exit event
+    
+    bpf_printk("trace_accept4: pid=%d sockfd=%d", bpf_get_current_pid_tgid() >> 32, sockfd);
+    
+    return 0;
+}
+
+// Exit handler for accept4
+SEC("tracepoint/syscalls/sys_exit_accept4")
+int trace_accept4_exit(struct trace_event_raw_sys_exit *ctx) {
+    int ret_fd = ctx->ret;
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
     
     // Skip invalid file descriptors
     if (ret_fd < 0) {
         return 0;
     }
     
-    bpf_printk("trace_accept4: pid=%d sockfd=%d ret_fd=%d", bpf_get_current_pid_tgid() >> 32, sockfd, ret_fd);
-
+    bpf_printk("trace_accept4_exit: pid=%d ret_fd=%d", pid, ret_fd);
+    
     // Create socket key for child socket
     struct socket_key child_key = {
-        .pid = bpf_get_current_pid_tgid() >> 32,
+        .pid = pid,
         .fd = ret_fd
     };
     
@@ -287,32 +281,33 @@ int trace_accept4(struct pt_regs *ctx) {
     // Initialize socket info
     struct socket_info sinfo = {
         .created_ns = bpf_ktime_get_ns(),
-        .parent_fd = sockfd,
+        .parent_fd = 0, // We don't know this from exit event
         .is_server = 1
     };
     bpf_map_update_elem(&socket_info, &child_key, &sinfo, BPF_ANY);
     
-    bpf_printk("trace_accept4: added socket pid=%d fd=%d to active sockets", child_key.pid, child_key.fd);
+    bpf_printk("trace_accept4_exit: added socket pid=%d fd=%d to active sockets", child_key.pid, child_key.fd);
     
     return 0;
 }
 
 // Trace connect syscall - Mark socket as active for clients
-SEC("kprobe/sys_connect")
-int trace_connect(struct pt_regs *ctx) {
+SEC("tracepoint/syscalls/sys_enter_connect")
+int trace_connect(struct trace_event_raw_sys_enter *ctx) {
     // Extract parameters
-    int sockfd = (int)SYSCALL_GET_PARM1(ctx);
+    int sockfd = ctx->args[0];
     
     // Skip invalid file descriptors
     if (sockfd < 0) {
         return 0;
     }
     
-    bpf_printk("trace_connect: pid=%d sockfd=%d", bpf_get_current_pid_tgid() >> 32, sockfd);
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    bpf_printk("trace_connect: pid=%d sockfd=%d", pid, sockfd);
 
     // Create socket key
     struct socket_key key = {
-        .pid = bpf_get_current_pid_tgid() >> 32,
+        .pid = pid,
         .fd = sockfd
     };
     
@@ -334,12 +329,12 @@ int trace_connect(struct pt_regs *ctx) {
 }
 
 // Trace write syscall - Capture HTTP requests
-SEC("kprobe/sys_write")
-int trace_write(struct pt_regs *ctx) {
+SEC("tracepoint/syscalls/sys_enter_write")
+int trace_write(struct trace_event_raw_sys_enter *ctx) {
     // Extract parameters
-    int fd = (int)SYSCALL_GET_PARM1(ctx);
-    char *buf = (char *)SYSCALL_GET_PARM2(ctx);
-    size_t len = (size_t)SYSCALL_GET_PARM3(ctx);
+    int fd = ctx->args[0];
+    char *buf = (char *)ctx->args[1];
+    size_t len = ctx->args[2];
     
     // Get current PID and create key
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -397,12 +392,12 @@ int trace_write(struct pt_regs *ctx) {
 }
 
 // Trace read syscall - Capture HTTP responses 
-SEC("kprobe/sys_read")
-int trace_read(struct pt_regs *ctx) {
+SEC("tracepoint/syscalls/sys_enter_read")
+int trace_read(struct trace_event_raw_sys_enter *ctx) {
     // Extract parameters before the syscall executes
-    int fd = (int)SYSCALL_GET_PARM1(ctx);
-    char *buf = (char *)SYSCALL_GET_PARM2(ctx);
-    size_t len = (size_t)SYSCALL_GET_PARM3(ctx);
+    int fd = ctx->args[0];
+    char *buf = (char *)ctx->args[1];
+    size_t len = ctx->args[2];
     
     // Get current PID and create key
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -436,10 +431,10 @@ int trace_read(struct pt_regs *ctx) {
 }
 
 // Return probe for read syscall
-SEC("kretprobe/sys_read")
-int trace_read_ret(struct pt_regs *ctx) {
+SEC("tracepoint/syscalls/sys_exit_read")
+int trace_read_ret(struct trace_event_raw_sys_exit *ctx) {
     // Get the return value (bytes read)
-    size_t bytes_read = (size_t)SYSCALL_GET_RETURN(ctx);
+    size_t bytes_read = ctx->ret;
     __u64 id = bpf_get_current_pid_tgid();
     
     // Retrieve the stored args
@@ -493,9 +488,9 @@ int trace_read_ret(struct pt_regs *ctx) {
 }
 
 // Trace close syscall - Remove from active sockets
-SEC("kprobe/sys_close")
-int trace_close(struct pt_regs *ctx) {
-    int fd = (int)SYSCALL_GET_PARM1(ctx);
+SEC("tracepoint/syscalls/sys_enter_close")
+int trace_close(struct trace_event_raw_sys_enter *ctx) {
+    int fd = ctx->args[0];
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     
     struct socket_key key = {
