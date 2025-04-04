@@ -1178,9 +1178,18 @@ func (t *Tracer) pollEvents() {
 				"timestamp":    httpEvent.Timestamp,
 			}).Debug("Raw event details")
 
-			// Skip coredns only - as it generates too much noise
+			// Skip unwanted processes early to avoid unnecessary processing
+			// Explicitly check for kubelet and cilium-agent as requested
 			if httpEvent.ProcessName == "coredns" ||
-				strings.Contains(strings.ToLower(httpEvent.Command), "coredns") {
+				httpEvent.ProcessName == "kubelet" ||
+				httpEvent.ProcessName == "cilium-agent" ||
+				strings.Contains(strings.ToLower(httpEvent.Command), "coredns") ||
+				strings.Contains(strings.ToLower(httpEvent.Command), "kubelet") ||
+				strings.Contains(strings.ToLower(httpEvent.Command), "cilium-agent") {
+				t.logger.WithFields(logrus.Fields{
+					"process_name": httpEvent.ProcessName,
+					"command":      httpEvent.Command,
+				}).Debug("Skipping ignored process")
 				continue
 			}
 
@@ -1232,11 +1241,19 @@ func (t *Tracer) pollEvents() {
 // IsRelevantApplication determines if the process is one we want detailed logs for
 func IsRelevantApplication(processName, command string) bool {
 	// Focus on our dummy HTTP server/client or other specific applications
-	relevantProcesses := []string{"gunicorn", "python", "curl", "httpbin", "dummy"}
+	relevantProcesses := []string{
+		"gunicorn",
+		"python",
+		"curl",
+		"httpbin",
+		"dummy",
+		"go-test",
+	}
 
 	// Processes to always ignore
 	ignoredProcesses := []string{
-		"kubelet",
+		"kubelet",      // Explicitly ignore kubelet
+		"cilium-agent", // Explicitly ignore cilium-agent
 		"kube-proxy",
 		"coredns",
 		"kube-apiserver",
@@ -1278,6 +1295,8 @@ func IsRelevantApplication(processName, command string) bool {
 		"--cluster-",
 		"-namespace=kube",
 		"-namespace monitoring",
+		"/opt/cni/bin",   // Added to ignore CNI-related processes
+		"/etc/cni/net.d", // Added to ignore CNI config related processes
 	}
 
 	for _, pattern := range ignoredPatterns {
