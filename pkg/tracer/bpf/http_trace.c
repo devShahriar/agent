@@ -71,8 +71,6 @@ struct {
 // Event types
 #define EVENT_TYPE_SSL_READ  1
 #define EVENT_TYPE_SSL_WRITE 2
-
-// Socket event types
 #define EVENT_TYPE_SOCKET_READ  3
 #define EVENT_TYPE_SOCKET_WRITE 4
 
@@ -97,16 +95,6 @@ static __always_inline int safe_read_user(void *dst, unsigned int size, const vo
         return -1;
     }
     return bpf_probe_read_user(dst, size, src);
-}
-
-// Helper function to safely read kernel data
-static __always_inline int safe_read_kernel(void *dst, unsigned int size, const void *src) {
-    // Ensure size is within bounds using bitwise AND
-    size &= (MAX_MSG_SIZE - 1);
-    if (size == 0) {
-        return -1;
-    }
-    return bpf_probe_read_kernel(dst, size, src);
 }
 
 // Helper function to check if data looks like HTTP
@@ -312,12 +300,10 @@ int trace_tcp_recv(struct pt_regs *ctx) {
         }
         event.data_len = len;
 
-        // Try to read the data (try both kernel and user space)
-        if (bpf_probe_read_kernel(event.data, len, buf) < 0) {
-            if (bpf_probe_read_user(event.data, len, buf) < 0) {
-                bpf_printk("TCP recv: failed to read buffer");
-                return 0;
-            }
+        // Try to read the data
+        if (bpf_probe_read_user(event.data, len, buf) < 0) {
+            bpf_printk("TCP recv: failed to read buffer");
+            return 0;
         }
 
         // Log the first few bytes for debugging
@@ -366,12 +352,10 @@ int trace_tcp_send(struct pt_regs *ctx) {
         }
         event.data_len = len;
 
-        // Try to read the data (try both kernel and user space)
-        if (bpf_probe_read_kernel(event.data, len, buf) < 0) {
-            if (bpf_probe_read_user(event.data, len, buf) < 0) {
-                bpf_printk("TCP send: failed to read buffer");
-                return 0;
-            }
+        // Try to read the data
+        if (bpf_probe_read_user(event.data, len, buf) < 0) {
+            bpf_printk("TCP send: failed to read buffer");
+            return 0;
         }
 
         // Log the first few bytes for debugging
