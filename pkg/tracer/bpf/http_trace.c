@@ -169,8 +169,6 @@ SEC("kprobe/sys_accept4")
 int trace_accept4(struct pt_regs *ctx) {
     http_event_t event = {};
     int sockfd = (int)ctx->rdi;
-    struct sockaddr *addr = (struct sockaddr *)ctx->rsi;
-    size_t *addrlen = (size_t *)ctx->rdx;
     
     // Get process info
     event.pid = bpf_get_current_pid_tgid() >> 32;
