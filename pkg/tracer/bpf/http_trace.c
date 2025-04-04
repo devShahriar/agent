@@ -4,59 +4,49 @@
 #define CORE_DISABLE_VDSO_LOOKUP 1
 #define HAVE_NO_VDSO 1
 
-// Platform-specific includes
-#ifdef __APPLE__
-// macOS-specific headers - minimal set for eBPF
-#include <stddef.h>
-#include <stdint.h>
+// Basic type definitions to avoid problematic includes
+typedef unsigned char __u8;
+typedef signed char __s8;
+typedef unsigned short __u16;
+typedef signed short __s16;
+typedef unsigned int __u32;
+typedef signed int __s32;
+typedef unsigned long long __u64;
+typedef signed long long __s64;
+typedef unsigned long size_t;
 
-#else
-// Linux headers
-#include <linux/bpf.h>
-#include <linux/ptrace.h>
-#include <linux/types.h>
-#include <linux/socket.h>
-#include <linux/uio.h>
-#include <linux/net.h>
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_tracing.h>
-#include <bpf/bpf_core_read.h>
-#include <stddef.h>  // For size_t
-#include <stdint.h>
-#endif
+// BPF map types and helpers
+#define BPF_MAP_TYPE_HASH 1
+#define BPF_MAP_TYPE_PERCPU_ARRAY 6
+#define BPF_MAP_TYPE_PERF_EVENT_ARRAY 4
+#define BPF_ANY 0
+#define BPF_F_CURRENT_CPU 0xffffffffULL
 
-#ifdef asm_inline
-#undef asm_inline
-#define asm_inline asm
-#endif
+// For maps
+#define __uint(name, val) int (*name)[val]
+#define __type(name, val) typeof(val) *name
 
-// Define tracepoint types for the bpf2go generator
+// Explicitly define the trace event raw structures
 struct trace_event_raw_sys_enter {
-    unsigned long long unused;
+    __u64 unused;
     long id;
     unsigned long args[6];
 };
 
 struct trace_event_raw_sys_exit {
-    unsigned long long unused;
+    __u64 unused;
     long id;
     long ret;
 };
 
-// Maximum size for our data buffer - must be power of 2
-#define MAX_MSG_SIZE 1024
+// Custom attribute declarations
+#define SEC(name) __attribute__((section(name), used))
+#define __always_inline inline __attribute__((always_inline))
 
-// Max buffer size for data
+// Maximum size for data buffer
 #define EVENT_BUF_SIZE 256
 
-// Process info structure
-struct process_info {
-    __u32 pid;
-    __u32 ppid;
-    char comm[16];
-} __attribute__((packed));
-
-// Event types (expanded)
+// Event types
 #define EVENT_SOCKET_READ    1  // Socket read event (HTTP response)
 #define EVENT_SOCKET_WRITE   2  // Socket write event (HTTP request)
 #define EVENT_SOCKET_ACCEPT  3  // Socket accept event
@@ -75,17 +65,6 @@ struct http_event_t {
     __u32 data_len;      // Length of data
     char data[EVENT_BUF_SIZE]; // Data buffer
 };
-
-// Zero value for maps
-__u32 zero = 0;
-
-// Connection state structure
-struct conn_state {
-    __u32 pid;
-    __u32 tid;
-    __u64 start_time;
-    __u8 is_active;
-} __attribute__((packed));
 
 // Structure to identify sockets
 struct socket_key {
@@ -108,172 +87,90 @@ struct read_args_t {
     size_t len;
 };
 
-// Map to store read arguments for return probes
+// Declare required maps
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(key_size, sizeof(__u64));
     __uint(value_size, sizeof(struct read_args_t));
     __uint(max_entries, 1024);
-} read_args_map SEC(".maps") = {};
+} read_args_map SEC(".maps");
 
-// Map to store events for userspace
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
     __uint(key_size, sizeof(int));
     __uint(value_size, sizeof(int));
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
-} events SEC(".maps") = {};
+} events SEC(".maps");
 
-// Per-CPU array for event storage
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(struct http_event_t));
     __uint(max_entries, 1);
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
-} event_storage SEC(".maps") = {};
+} event_storage SEC(".maps");
 
-// Map to store connection state
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(struct conn_state));
-    __uint(max_entries, 1024);
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
-} conn_state SEC(".maps") = {};
-
-// Map to store process info
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(struct process_info));
-    __uint(max_entries, 1024);
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
-} process_info SEC(".maps") = {};
-
-// Map to store active file descriptors
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(_Bool));
-    __uint(max_entries, 1024);
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
-} active_fds SEC(".maps") = {};
-
-// Map to store active sockets by process ID and file descriptor
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(key_size, sizeof(struct socket_key));
     __uint(value_size, sizeof(_Bool));
     __uint(max_entries, 10240);
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
-} active_sockets SEC(".maps") = {};
+} active_sockets SEC(".maps");
 
-// Map to track socket state
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(key_size, sizeof(struct socket_key));
     __uint(value_size, sizeof(struct socket_info));
     __uint(max_entries, 10240);
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
-} socket_info SEC(".maps") = {};
+} socket_info SEC(".maps");
 
-// Helper function to check if data looks like HTTP with improved detection
+// Helper function declarations for BPF
+static long (*bpf_probe_read_user)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)4;
+static long (*bpf_map_update_elem)(void *map, const void *key, const void *value, __u64 flags) = (void *)2;
+static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)1;
+static long (*bpf_map_delete_elem)(void *map, const void *key) = (void *)3;
+static long (*bpf_perf_event_output)(void *ctx, void *map, __u64 flags, void *data, __u64 size) = (void *)25;
+static __u64 (*bpf_ktime_get_ns)(void) = (void *)5;
+static long (*bpf_get_current_pid_tgid)(void) = (void *)14;
+static long (*bpf_trace_printk)(const char *fmt, __u32 fmt_size, ...) = (void *)6;
+
+// Zero value for maps
+__u32 zero = 0;
+
+// Helper macro for debug printing
+#define bpf_printk(fmt, ...)                           \
+({                                                     \
+    char ____fmt[] = fmt;                              \
+    bpf_trace_printk(____fmt, sizeof(____fmt),         \
+             ##__VA_ARGS__);                           \
+})
+
+// Helper function to check if data looks like HTTP
 static __always_inline int is_http_data(const char *data, size_t len) {
-    bpf_printk("is_http_data: data length = %d", len);
-
     if (len < 4) {
-        bpf_printk("is_http_data: data too short (%d bytes)", len);
         return 0;
     }
     
-    // Log the first 16 bytes of data
-    if (len >= 16) {
-        bpf_printk("is_http_data: data = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15]);
-    } else {
-        bpf_printk("is_http_data: data = %02x %02x %02x %02x",
-            data[0], data[1], data[2], data[3]);
-    }
-    
-    // HTTP request methods (complete list)
-    if (len >= 3 && data[0] == 'G' && data[1] == 'E' && data[2] == 'T') {
-        bpf_printk("is_http_data: found GET request");
+    // HTTP request methods
+    if (len >= 3 && data[0] == 'G' && data[1] == 'E' && data[2] == 'T')
         return 1;
-    }
-    if (len >= 4 && data[0] == 'P' && data[1] == 'O' && data[2] == 'S' && data[3] == 'T') {
-        bpf_printk("is_http_data: found POST request");
+    if (len >= 4 && data[0] == 'P' && data[1] == 'O' && data[2] == 'S' && data[3] == 'T')
         return 1;
-    }
-    if (len >= 3 && data[0] == 'P' && data[1] == 'U' && data[2] == 'T') {
-        bpf_printk("is_http_data: found PUT request");
+    if (len >= 3 && data[0] == 'P' && data[1] == 'U' && data[2] == 'T')
         return 1;
-    }
-    if (len >= 6 && data[0] == 'D' && data[1] == 'E' && data[2] == 'L' && data[3] == 'E' && data[4] == 'T' && data[5] == 'E') {
-        bpf_printk("is_http_data: found DELETE request");
+    if (len >= 4 && data[0] == 'H' && data[1] == 'E' && data[2] == 'A' && data[3] == 'D')
         return 1;
-    }
-    if (len >= 4 && data[0] == 'H' && data[1] == 'E' && data[2] == 'A' && data[3] == 'D') {
-        bpf_printk("is_http_data: found HEAD request");
-        return 1;
-    }
-    if (len >= 7 && data[0] == 'O' && data[1] == 'P' && data[2] == 'T' && data[3] == 'I' && data[4] == 'O' && data[5] == 'N' && data[6] == 'S') {
-        bpf_printk("is_http_data: found OPTIONS request");
-        return 1;
-    }
-    if (len >= 5 && data[0] == 'P' && data[1] == 'A' && data[2] == 'T' && data[3] == 'C' && data[4] == 'H') {
-        bpf_printk("is_http_data: found PATCH request");
-        return 1;
-    }
     
     // HTTP responses
-    if (len >= 4 && data[0] == 'H' && data[1] == 'T' && data[2] == 'T' && data[3] == 'P') {
-        bpf_printk("is_http_data: found HTTP response");
+    if (len >= 4 && data[0] == 'H' && data[1] == 'T' && data[2] == 'T' && data[3] == 'P')
         return 1;
-    }
     
-    // HTTP headers (more comprehensive)
-    if (len >= 16 && data[0] == 'C' && data[1] == 'o' && data[2] == 'n' && data[3] == 't' && data[4] == 'e' && data[5] == 'n' && data[6] == 't' && data[7] == '-') {
-        bpf_printk("is_http_data: found Content header");
-        return 1;
-    }
-    if (len >= 6 && data[0] == 'H' && data[1] == 'o' && data[2] == 's' && data[3] == 't' && data[4] == ':' && data[5] == ' ') {
-        bpf_printk("is_http_data: found Host header");
-        return 1;
-    }
-    if (len >= 15 && data[0] == 'A' && data[1] == 'c' && data[2] == 'c' && data[3] == 'e' && data[4] == 'p' && data[5] == 't') {
-        bpf_printk("is_http_data: found Accept header");
-        return 1;
-    }
-    if (len >= 13 && data[0] == 'U' && data[1] == 's' && data[2] == 'e' && data[3] == 'r' && data[4] == '-' && data[5] == 'A' && data[6] == 'g' && data[7] == 'e' && data[8] == 'n' && data[9] == 't') {
-        bpf_printk("is_http_data: found User-Agent header");
-        return 1;
-    }
-    if (len >= 13 && data[0] == 'C' && data[1] == 'o' && data[2] == 'n' && data[3] == 'n' && data[4] == 'e' && data[5] == 'c' && data[6] == 't' && data[7] == 'i' && data[8] == 'o' && data[9] == 'n') {
-        bpf_printk("is_http_data: found Connection header");
-        return 1;
-    }
-    
-    // Try to detect JSON payloads which might be API calls
-    if (len >= 2 && data[0] == '{' && data[len-1] == '}') {
-        bpf_printk("is_http_data: found JSON payload");
-        return 1;
-    }
-    
-    bpf_printk("is_http_data: no HTTP data detected");
     return 0;
 }
 
 // Trace accept4 syscall - Mark socket as active
 SEC("tracepoint/syscalls/sys_enter_accept4")
 int TraceAccept4(struct trace_event_raw_sys_enter *ctx) {
-    // Extract parameters
-    int sockfd = ctx->args[0];
-    // Return value only available in exit event
-    
-    bpf_printk("trace_accept4: pid=%d sockfd=%d", bpf_get_current_pid_tgid() >> 32, sockfd);
-    
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    bpf_printk("TraceAccept4: pid=%d", pid);
     return 0;
 }
 
@@ -283,32 +180,26 @@ int TraceAccept4Exit(struct trace_event_raw_sys_exit *ctx) {
     int ret_fd = ctx->ret;
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     
-    // Skip invalid file descriptors
     if (ret_fd < 0) {
         return 0;
     }
     
-    bpf_printk("trace_accept4_exit: pid=%d ret_fd=%d", pid, ret_fd);
+    bpf_printk("TraceAccept4Exit: pid=%d ret_fd=%d", pid, ret_fd);
     
-    // Create socket key for child socket
-    struct socket_key child_key = {
+    struct socket_key key = {
         .pid = pid,
         .fd = ret_fd
     };
     
-    // Mark as active socket (HTTP server)
     _Bool is_active = 1;
-    bpf_map_update_elem(&active_sockets, &child_key, &is_active, BPF_ANY);
+    bpf_map_update_elem(&active_sockets, &key, &is_active, BPF_ANY);
     
-    // Initialize socket info
-    struct socket_info sinfo = {
+    struct socket_info info = {
         .created_ns = bpf_ktime_get_ns(),
-        .parent_fd = 0, // We don't know this from exit event
+        .parent_fd = 0,
         .is_server = 1
     };
-    bpf_map_update_elem(&socket_info, &child_key, &sinfo, BPF_ANY);
-    
-    bpf_printk("trace_accept4_exit: added socket pid=%d fd=%d to active sockets", child_key.pid, child_key.fd);
+    bpf_map_update_elem(&socket_info, &key, &info, BPF_ANY);
     
     return 0;
 }
@@ -316,36 +207,29 @@ int TraceAccept4Exit(struct trace_event_raw_sys_exit *ctx) {
 // Trace connect syscall - Mark socket as active for clients
 SEC("tracepoint/syscalls/sys_enter_connect")
 int TraceConnect(struct trace_event_raw_sys_enter *ctx) {
-    // Extract parameters
     int sockfd = ctx->args[0];
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
     
-    // Skip invalid file descriptors
     if (sockfd < 0) {
         return 0;
     }
     
-    __u32 pid = bpf_get_current_pid_tgid() >> 32;
-    bpf_printk("trace_connect: pid=%d sockfd=%d", pid, sockfd);
-
-    // Create socket key
+    bpf_printk("TraceConnect: pid=%d sockfd=%d", pid, sockfd);
+    
     struct socket_key key = {
         .pid = pid,
         .fd = sockfd
     };
     
-    // Mark as active socket (HTTP client)
     _Bool is_active = 1;
     bpf_map_update_elem(&active_sockets, &key, &is_active, BPF_ANY);
     
-    // Initialize socket info
-    struct socket_info sinfo = {
+    struct socket_info info = {
         .created_ns = bpf_ktime_get_ns(),
         .parent_fd = 0,
         .is_server = 0
     };
-    bpf_map_update_elem(&socket_info, &key, &sinfo, BPF_ANY);
-    
-    bpf_printk("trace_connect: added socket pid=%d fd=%d to active sockets", key.pid, key.fd);
+    bpf_map_update_elem(&socket_info, &key, &info, BPF_ANY);
     
     return 0;
 }
@@ -353,61 +237,43 @@ int TraceConnect(struct trace_event_raw_sys_enter *ctx) {
 // Trace write syscall - Capture HTTP requests
 SEC("tracepoint/syscalls/sys_enter_write")
 int TraceWrite(struct trace_event_raw_sys_enter *ctx) {
-    // Extract parameters
     int fd = ctx->args[0];
     char *buf = (char *)ctx->args[1];
     size_t len = ctx->args[2];
     
-    // Get current PID and create key
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     struct socket_key key = {
         .pid = pid,
         .fd = fd
     };
     
-    // Check if this is an active socket we're monitoring
     _Bool *is_active = bpf_map_lookup_elem(&active_sockets, &key);
     if (!is_active) {
         return 0;
     }
     
-    bpf_printk("trace_write: pid=%d fd=%d len=%d (active socket)", pid, fd, len);
-    
-    // Early return if no data
     if (buf == NULL || len == 0 || len > EVENT_BUF_SIZE) {
-        bpf_printk("trace_write: invalid buffer or length: buf=%p, len=%d", buf, len);
         return 0;
     }
     
-    // Get event from per-CPU array
     struct http_event_t *event = bpf_map_lookup_elem(&event_storage, &zero);
     if (!event) {
-        bpf_printk("trace_write: failed to get event from storage");
         return 0;
     }
     
-    // Initialize event fields
     event->pid = pid;
     event->tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
     event->timestamp = bpf_ktime_get_ns();
     event->fd = fd;
-    event->type = EVENT_SOCKET_WRITE; // This is generally a request
+    event->type = EVENT_SOCKET_WRITE;
     event->data_len = len < EVENT_BUF_SIZE ? len : EVENT_BUF_SIZE;
     
-    // Read the data from user space
-    int ret = bpf_probe_read_user(event->data, event->data_len, buf);
-    if (ret < 0) {
-        bpf_printk("trace_write: failed to read user data: %d", ret);
+    if (bpf_probe_read_user(event->data, event->data_len, buf) < 0) {
         return 0;
     }
     
-    // Check if it's HTTP
     if (is_http_data(event->data, event->data_len)) {
-        bpf_printk("trace_write: found HTTP data for pid=%d fd=%d len=%d", event->pid, fd, len);
-        ret = bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, event, sizeof(*event));
-        bpf_printk("trace_write: bpf_perf_event_output returned %d", ret);
-    } else {
-        bpf_printk("trace_write: not HTTP data for pid=%d fd=%d len=%d", event->pid, fd, len);
+        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, event, sizeof(*event));
     }
     
     return 0;
@@ -416,38 +282,30 @@ int TraceWrite(struct trace_event_raw_sys_enter *ctx) {
 // Trace read syscall - Capture HTTP responses 
 SEC("tracepoint/syscalls/sys_enter_read")
 int TraceRead(struct trace_event_raw_sys_enter *ctx) {
-    // Extract parameters before the syscall executes
     int fd = ctx->args[0];
     char *buf = (char *)ctx->args[1];
     size_t len = ctx->args[2];
     
-    // Get current PID and create key
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     struct socket_key key = {
         .pid = pid,
         .fd = fd
     };
     
-    // Check if this is an active socket we're monitoring
     _Bool *is_active = bpf_map_lookup_elem(&active_sockets, &key);
     if (!is_active) {
         return 0;
     }
     
-    bpf_printk("trace_read: pid=%d fd=%d len=%d (active socket)", pid, fd, len);
-    
-    // We can't read the buffer before the syscall executes,
-    // so attach a return probe to read after
-    struct read_args_t read_args = {
+    struct read_args_t args = {
         .pid = pid,
         .fd = fd,
         .buf = buf,
         .len = len
     };
     
-    // Store the args for the return probe
     __u64 id = bpf_get_current_pid_tgid();
-    bpf_map_update_elem(&read_args_map, &id, &read_args, BPF_ANY);
+    bpf_map_update_elem(&read_args_map, &id, &args, BPF_ANY);
     
     return 0;
 }
@@ -455,11 +313,9 @@ int TraceRead(struct trace_event_raw_sys_enter *ctx) {
 // Return probe for read syscall
 SEC("tracepoint/syscalls/sys_exit_read")
 int TraceReadRet(struct trace_event_raw_sys_exit *ctx) {
-    // Get the return value (bytes read)
     size_t bytes_read = ctx->ret;
     __u64 id = bpf_get_current_pid_tgid();
     
-    // Retrieve the stored args
     struct read_args_t *args = bpf_map_lookup_elem(&read_args_map, &id);
     if (!args || bytes_read <= 0) {
         if (args) {
@@ -468,44 +324,29 @@ int TraceReadRet(struct trace_event_raw_sys_exit *ctx) {
         return 0;
     }
     
-    bpf_printk("trace_read_ret: pid=%d fd=%d bytes_read=%d", args->pid, args->fd, bytes_read);
-    
-    // Get event from per-CPU array
     struct http_event_t *event = bpf_map_lookup_elem(&event_storage, &zero);
     if (!event) {
-        bpf_printk("trace_read_ret: failed to get event from storage");
         bpf_map_delete_elem(&read_args_map, &id);
         return 0;
     }
     
-    // Initialize event fields
     event->pid = args->pid;
     event->tid = id & 0xFFFFFFFF;
     event->timestamp = bpf_ktime_get_ns();
     event->fd = args->fd;
-    event->type = EVENT_SOCKET_READ; // This is generally a response
+    event->type = EVENT_SOCKET_READ;
     event->data_len = bytes_read < EVENT_BUF_SIZE ? bytes_read : EVENT_BUF_SIZE;
     
-    // Read the data that was read into the user's buffer
-    int ret = bpf_probe_read_user(event->data, event->data_len, args->buf);
-    if (ret < 0) {
-        bpf_printk("trace_read_ret: failed to read user data: %d", ret);
+    if (bpf_probe_read_user(event->data, event->data_len, args->buf) < 0) {
         bpf_map_delete_elem(&read_args_map, &id);
         return 0;
     }
     
-    // Check if it's HTTP
     if (is_http_data(event->data, event->data_len)) {
-        bpf_printk("trace_read_ret: found HTTP data for pid=%d fd=%d len=%d", event->pid, args->fd, bytes_read);
-        ret = bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, event, sizeof(*event));
-        bpf_printk("trace_read_ret: bpf_perf_event_output returned %d", ret);
-    } else {
-        bpf_printk("trace_read_ret: not HTTP data for pid=%d fd=%d len=%d", event->pid, args->fd, bytes_read);
+        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, event, sizeof(*event));
     }
     
-    // Clean up
     bpf_map_delete_elem(&read_args_map, &id);
-    
     return 0;
 }
 
@@ -520,10 +361,8 @@ int TraceClose(struct trace_event_raw_sys_enter *ctx) {
         .fd = fd
     };
     
-    // Check if this fd is in our active set
     _Bool *is_active = bpf_map_lookup_elem(&active_sockets, &key);
     if (is_active) {
-        bpf_printk("trace_close: pid=%d fd=%d (active socket)", pid, fd);
         bpf_map_delete_elem(&active_sockets, &key);
         bpf_map_delete_elem(&socket_info, &key);
     }
@@ -531,7 +370,5 @@ int TraceClose(struct trace_event_raw_sys_enter *ctx) {
     return 0;
 }
 
-// Explicitly set program version to avoid vDSO lookup
-__u32 _version SEC("version") = 0xFFFFFFFE;
-
+// License
 char _license[] SEC("license") = "GPL";

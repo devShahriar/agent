@@ -1,0 +1,25 @@
+FROM ubuntu:20.04
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    clang \
+    llvm \
+    libbpf-dev \
+    golang \
+    git \
+    libelf-dev \
+    gcc-multilib \
+    libc6-dev-i386 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up a working directory
+WORKDIR /app
+
+# Copy the BPF code
+COPY . .
+
+# Generate the BPF code
+CMD cd pkg/tracer && \
+    go generate && \
+    chown -R $(stat -c "%u:%g" .) . 
