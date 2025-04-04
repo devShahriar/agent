@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -104,6 +105,17 @@ func main() {
 
 	// Set up event callback
 	t.SetEventCallback(func(event tracer.HTTPEvent) {
+		// Skip Kubernetes system processes
+		if strings.Contains(strings.ToLower(event.ProcessName), "kube") ||
+			strings.Contains(strings.ToLower(event.Command), "kube") {
+			return
+		}
+
+		// Skip health check endpoints
+		if event.URL != "" && strings.Contains(strings.ToLower(event.URL), "/health") {
+			return
+		}
+
 		// Skip detailed logging for non-target applications unless in debug mode
 		if log.Level != logrus.DebugLevel &&
 			!tracer.IsRelevantApplication(event.ProcessName, event.Command) {
@@ -123,9 +135,11 @@ func main() {
 			"data_len":     event.DataLen,
 		}).Info("HTTP event received")
 
-		// Store event
-		if err := storage.Store(event); err != nil {
-			log.WithError(err).Error("Failed to store event")
+		// Store event (only if not a health check endpoint)
+		if event.URL == "" || !tracer.IsHealthCheck(event.URL) {
+			if err := storage.Store(event); err != nil {
+				log.WithError(err).Error("Failed to store event")
+			}
 		}
 	})
 

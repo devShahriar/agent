@@ -1074,10 +1074,77 @@ func (t *Tracer) pollEvents() {
 	}
 }
 
+// IsRelevantApplication determines if the process is one we want detailed logs for
+func IsRelevantApplication(processName, command string) bool {
+	// Focus on our dummy HTTP server/client or other specific applications
+	relevantProcesses := []string{"gunicorn", "python", "curl", "httpbin", "dummy"}
+
+	// Processes to always ignore
+	ignoredProcesses := []string{"kubelet", "kube-proxy", "coredns"}
+
+	processNameLower := strings.ToLower(processName)
+	commandLower := strings.ToLower(command)
+
+	// First check if it's in the ignored list
+	for _, proc := range ignoredProcesses {
+		if strings.Contains(processNameLower, proc) ||
+			strings.Contains(commandLower, proc) {
+			return false
+		}
+	}
+
+	// Check process name
+	for _, proc := range relevantProcesses {
+		if strings.Contains(processNameLower, proc) {
+			return true
+		}
+	}
+
+	// Check command
+	for _, proc := range relevantProcesses {
+		if strings.Contains(commandLower, proc) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// IsHealthCheck determines if a URL is a health check endpoint
+func IsHealthCheck(url string) bool {
+	healthPaths := []string{
+		"/health",
+		"/healthz",
+		"/ready",
+		"/readyz",
+		"/alive",
+		"/ping",
+		"/status",
+		"/metrics",
+	}
+
+	urlLower := strings.ToLower(url)
+	for _, path := range healthPaths {
+		if strings.Contains(urlLower, path) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // handleHTTPEvent processes an HTTP event to track transactions
 func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 	t.connMu.Lock()
 	defer t.connMu.Unlock()
+
+	// Skip health check endpoints
+	if event.URL != "" && IsHealthCheck(event.URL) {
+		t.logger.WithFields(logrus.Fields{
+			"url": event.URL,
+		}).Debug("Skipping health check endpoint")
+		return
+	}
 
 	// Create connection key from process ID and connection ID
 	connKey := fmt.Sprintf("%d:%d", event.PID, event.ConnID)
@@ -1126,16 +1193,24 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 
 			// Only log transactions for relevant applications at INFO level
 			if IsRelevantApplication(tx.ProcessName, tx.Command) {
-				// Log the complete transaction with better formatting
-				t.logger.WithFields(logrus.Fields{
-					"method":      req.Method,
-					"url":         req.URL,
-					"status_code": event.StatusCode,
-					"duration_ms": tx.Duration.Milliseconds(),
-					"process":     tx.ProcessName,
-					"request":     reqFormatted,
-					"response":    respFormatted,
-				}).Info("HTTP Transaction completed")
+				// Skip health check URLs even for relevant applications
+				if req.URL != "" && IsHealthCheck(req.URL) {
+					t.logger.WithFields(logrus.Fields{
+						"method": req.Method,
+						"url":    req.URL,
+					}).Debug("Skipping health check transaction")
+				} else {
+					// Log the complete transaction with better formatting
+					t.logger.WithFields(logrus.Fields{
+						"method":      req.Method,
+						"url":         req.URL,
+						"status_code": event.StatusCode,
+						"duration_ms": tx.Duration.Milliseconds(),
+						"process":     tx.ProcessName,
+						"request":     reqFormatted,
+						"response":    respFormatted,
+					}).Info("HTTP Transaction completed")
+				}
 			} else {
 				// More concise log for less relevant applications at DEBUG level
 				t.logger.WithFields(logrus.Fields{
@@ -1147,8 +1222,8 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 				}).Debug("HTTP Transaction completed")
 			}
 
-			// Store the transaction
-			if t.storage != nil {
+			// Store the transaction only if it's not a health check
+			if t.storage != nil && (req.URL == "" || !IsHealthCheck(req.URL)) {
 				if err := t.storage.StoreTransaction(tx); err != nil {
 					t.logger.WithError(err).Error("Failed to store HTTP transaction")
 				}
@@ -1184,31 +1259,6 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 			delete(t.connections, key)
 		}
 	}
-}
-
-// IsRelevantApplication determines if the process is one we want detailed logs for
-func IsRelevantApplication(processName, command string) bool {
-	// Focus on our dummy HTTP server/client or other specific applications
-	relevantProcesses := []string{"gunicorn", "python", "curl", "httpbin", "dummy"}
-
-	processNameLower := strings.ToLower(processName)
-	commandLower := strings.ToLower(command)
-
-	// Check process name
-	for _, proc := range relevantProcesses {
-		if strings.Contains(processNameLower, proc) {
-			return true
-		}
-	}
-
-	// Check command
-	for _, proc := range relevantProcesses {
-		if strings.Contains(commandLower, proc) {
-			return true
-		}
-	}
-
-	return false
 }
 
 // Stop stops tracing HTTP traffic
