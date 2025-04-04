@@ -8,7 +8,6 @@ import (
 	"os/signal"
 	"path"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
@@ -105,41 +104,34 @@ func main() {
 
 	// Set up event callback
 	t.SetEventCallback(func(event tracer.HTTPEvent) {
-		// Skip Kubernetes system processes
-		if strings.Contains(strings.ToLower(event.ProcessName), "kube") ||
-			strings.Contains(strings.ToLower(event.Command), "kube") {
+		// Skip all Kubernetes related processes
+		if !tracer.IsRelevantApplication(event.ProcessName, event.Command) {
 			return
 		}
 
-		// Skip health check endpoints
-		if event.URL != "" && strings.Contains(strings.ToLower(event.URL), "/health") {
+		// Skip all health check and Kubernetes API endpoints
+		if event.URL != "" && tracer.IsHealthCheck(event.URL) {
 			return
 		}
 
-		// Skip detailed logging for non-target applications unless in debug mode
-		if log.Level != logrus.DebugLevel &&
-			!tracer.IsRelevantApplication(event.ProcessName, event.Command) {
+		// Skip if PID is too high (likely containerized system processes)
+		if event.PID > 100000 {
 			return
 		}
 
-		// Log event summary
+		// Log event summary for relevant applications only
 		log.WithFields(logrus.Fields{
 			"type":         event.Type,
 			"pid":          event.PID,
-			"tid":          event.TID,
 			"process_name": event.ProcessName,
 			"method":       event.Method,
 			"url":          event.URL,
 			"status_code":  event.StatusCode,
-			"content_type": event.ContentType,
-			"data_len":     event.DataLen,
 		}).Info("HTTP event received")
 
-		// Store event (only if not a health check endpoint)
-		if event.URL == "" || !tracer.IsHealthCheck(event.URL) {
-			if err := storage.Store(event); err != nil {
-				log.WithError(err).Error("Failed to store event")
-			}
+		// Store event
+		if err := storage.Store(event); err != nil {
+			log.WithError(err).Error("Failed to store event")
 		}
 	})
 

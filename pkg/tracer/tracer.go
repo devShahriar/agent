@@ -736,6 +736,11 @@ func (t *Tracer) Start() error {
 
 // getProcessInfo retrieves the process name and command for a PID
 func (t *Tracer) getProcessInfo(pid uint32) (name, cmdLine string) {
+	// Skip invalid PIDs
+	if pid == 0 || pid > 1000000 {
+		return "unknown", "unknown"
+	}
+
 	t.procMu.RLock()
 	if info, ok := t.procCache[pid]; ok {
 		t.procMu.RUnlock()
@@ -743,17 +748,26 @@ func (t *Tracer) getProcessInfo(pid uint32) (name, cmdLine string) {
 	}
 	t.procMu.RUnlock()
 
+	name = "unknown"
+	cmdLine = "unknown"
+
 	// Get process name from /proc/[pid]/comm
-	commBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
-	if err == nil {
-		name = strings.TrimSpace(string(commBytes))
+	commPath := fmt.Sprintf("/proc/%d/comm", pid)
+	if _, err := os.Stat(commPath); err == nil {
+		commBytes, err := os.ReadFile(commPath)
+		if err == nil {
+			name = strings.TrimSpace(string(commBytes))
+		}
 	}
 
 	// Get command line from /proc/[pid]/cmdline
-	cmdLineBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err == nil {
-		cmdLine = strings.ReplaceAll(string(cmdLineBytes), "\x00", " ")
-		cmdLine = strings.TrimSpace(cmdLine)
+	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	if _, err := os.Stat(cmdlinePath); err == nil {
+		cmdLineBytes, err := os.ReadFile(cmdlinePath)
+		if err == nil {
+			cmdLine = strings.ReplaceAll(string(cmdLineBytes), "\x00", " ")
+			cmdLine = strings.TrimSpace(cmdLine)
+		}
 	}
 
 	// Cache the result
@@ -951,7 +965,11 @@ func (t *Tracer) pollEvents() {
 				continue
 			}
 
-			t.logger.WithField("record", record).Debug("Received perf event")
+			// Skip if record is too small or missing
+			if record.RawSample == nil || len(record.RawSample) < 4 {
+				t.logger.Debug("Skipping empty or too small record")
+				continue
+			}
 
 			// Create a temp struct that matches the BPF binary format
 			type bpfEvent struct {
@@ -972,6 +990,35 @@ func (t *Tracer) pollEvents() {
 				continue
 			}
 
+			// Basic validation of event data
+			if bpfData.Type < 1 || bpfData.Type > 4 {
+				t.logger.WithFields(logrus.Fields{
+					"invalid_type": bpfData.Type,
+				}).Debug("Skipping event with invalid type")
+				continue
+			}
+
+			if bpfData.Timestamp == 0 {
+				t.logger.Debug("Skipping event with zero timestamp")
+				continue
+			}
+
+			// Filter out suspiciously large data lengths (likely garbage data)
+			// Known garbage data sizes from kubernetes components
+			knownGarbageSizes := []uint32{1543503872, 1979711488}
+			isKnownGarbage := false
+			for _, size := range knownGarbageSizes {
+				if bpfData.DataLen == size {
+					isKnownGarbage = true
+					break
+				}
+			}
+
+			if isKnownGarbage || bpfData.DataLen > 1000000 {
+				// Just silently skip - no logging even at debug level
+				continue
+			}
+
 			// Convert to our HTTPEvent struct
 			httpEvent.PID = bpfData.PID
 			httpEvent.TID = bpfData.TID
@@ -981,57 +1028,39 @@ func (t *Tracer) pollEvents() {
 
 			// Ensure data length is valid (cap at buffer size)
 			if bpfData.DataLen > uint32(len(httpEvent.Data)) {
-				t.logger.WithFields(logrus.Fields{
-					"pid":         bpfData.PID,
-					"claimed_len": bpfData.DataLen,
-					"max_len":     len(httpEvent.Data),
-				}).Warn("Received oversized data length, truncating")
+				// Silently truncate without logging
 				httpEvent.DataLen = uint32(len(httpEvent.Data))
 			} else {
 				httpEvent.DataLen = bpfData.DataLen
 			}
 
-			copy(httpEvent.Data[:], bpfData.Data[:])
+			// Skip if data length is zero
+			if httpEvent.DataLen == 0 {
+				t.logger.Debug("Skipping event with zero data length")
+				continue
+			}
 
-			t.logger.WithFields(logrus.Fields{
-				"pid":      httpEvent.PID,
-				"tid":      httpEvent.TID,
-				"type":     httpEvent.Type,
-				"conn_id":  httpEvent.ConnID,
-				"data_len": httpEvent.DataLen,
-			}).Debug("Parsed HTTP event")
+			copy(httpEvent.Data[:], bpfData.Data[:])
 
 			// Get process info
 			name, cmdLine := t.getProcessInfo(httpEvent.PID)
 			httpEvent.ProcessName = name
 			httpEvent.Command = cmdLine
 
-			// Skip CoreDNS events - ignore all events from the CoreDNS process
-			if httpEvent.ProcessName == "coredns" ||
-				strings.Contains(strings.ToLower(httpEvent.Command), "coredns") {
-				// Skip only if it's CoreDNS
-				if !strings.Contains(
-					strings.ToLower(httpEvent.ProcessName),
-					"gunicorn",
-				) &&
-					!strings.Contains(strings.ToLower(httpEvent.ProcessName), "python") &&
-					!strings.Contains(strings.ToLower(httpEvent.Command), "httpbin") {
-					t.logger.WithFields(logrus.Fields{
-						"pid":          httpEvent.PID,
-						"process_name": httpEvent.ProcessName,
-					}).Debug("Skipping CoreDNS event")
-					continue
-				}
+			// Skip events from ignored processes (CoreDNS, kubelet, etc.)
+			if !IsRelevantApplication(httpEvent.ProcessName, httpEvent.Command) {
+				// Silently skip kubernetes processes
+				continue
 			}
-
-			t.logger.WithFields(logrus.Fields{
-				"pid":          httpEvent.PID,
-				"process_name": httpEvent.ProcessName,
-				"command":      httpEvent.Command,
-			}).Debug("Retrieved process info")
 
 			// Parse HTTP data
 			parseHTTPData(&httpEvent)
+
+			// Skip health check endpoints
+			if httpEvent.URL != "" && IsHealthCheck(httpEvent.URL) {
+				// Skip silently
+				continue
+			}
 
 			t.logger.WithFields(logrus.Fields{
 				"pid":         httpEvent.PID,
@@ -1052,7 +1081,6 @@ func (t *Tracer) pollEvents() {
 				"status_code":  httpEvent.StatusCode,
 				"content_type": httpEvent.ContentType,
 				"data_len":     httpEvent.DataLen,
-				"data":         string(httpEvent.Data[:httpEvent.DataLen]),
 			}).Info("HTTP event received")
 
 			// Handle the event - track request and response pairs
@@ -1080,7 +1108,25 @@ func IsRelevantApplication(processName, command string) bool {
 	relevantProcesses := []string{"gunicorn", "python", "curl", "httpbin", "dummy"}
 
 	// Processes to always ignore
-	ignoredProcesses := []string{"kubelet", "kube-proxy", "coredns"}
+	ignoredProcesses := []string{
+		"kubelet",
+		"kube-proxy",
+		"coredns",
+		"kube-apiserver",
+		"kube-scheduler",
+		"kube-controller",
+		"etcd",
+		"flanneld",
+		"calico",
+		"cilium",
+		"containerd",
+		"crio",
+		"dockerd",
+		"flannel",
+		"metrics-server",
+		"k8s",
+		"kubernetes",
+	}
 
 	processNameLower := strings.ToLower(processName)
 	commandLower := strings.ToLower(command)
@@ -1089,6 +1135,26 @@ func IsRelevantApplication(processName, command string) bool {
 	for _, proc := range ignoredProcesses {
 		if strings.Contains(processNameLower, proc) ||
 			strings.Contains(commandLower, proc) {
+			return false
+		}
+	}
+
+	// Common command patterns to ignore
+	ignoredPatterns := []string{
+		"/var/lib/kubelet",
+		"/var/lib/containerd",
+		"/var/run/kubernetes",
+		"/etc/kubernetes",
+		"/usr/local/bin/kube",
+		"--kubeconfig",
+		"--node-name",
+		"--cluster-",
+		"-namespace=kube",
+		"-namespace monitoring",
+	}
+
+	for _, pattern := range ignoredPatterns {
+		if strings.Contains(commandLower, pattern) {
 			return false
 		}
 	}
@@ -1110,8 +1176,33 @@ func IsRelevantApplication(processName, command string) bool {
 	return false
 }
 
-// IsHealthCheck determines if a URL is a health check endpoint
+// IsHealthCheck determines if a URL is a health check endpoint or Kubernetes API call
 func IsHealthCheck(url string) bool {
+	if url == "" {
+		return false
+	}
+
+	// Kubernetes API path patterns
+	kubeApiPatterns := []string{
+		"/api/v1/",
+		"/apis/",
+		"/metrics",
+		"/openapi",
+		"/version",
+		"/healthz",
+		"/livez",
+		"/readyz",
+		"/logs",
+		"/kube-",
+		"/swagger",
+	}
+
+	for _, pattern := range kubeApiPatterns {
+		if strings.Contains(url, pattern) {
+			return true
+		}
+	}
+
 	healthPaths := []string{
 		"/health",
 		"/healthz",
@@ -1121,6 +1212,30 @@ func IsHealthCheck(url string) bool {
 		"/ping",
 		"/status",
 		"/metrics",
+		"/livez",
+		// Kubelet specific paths
+		"/pods",
+		"/stats",
+		"/containerLogs",
+		"/run",
+		"/exec",
+		"/attach",
+		"/portForward",
+		"/cri",
+		"/debug/",
+		"/node/",
+		"/proxy/",
+		"proxy?path=",
+	}
+
+	// Common query parameters used in health checks
+	if strings.Contains(url, "?watch=") ||
+		strings.Contains(url, "healthz") ||
+		strings.Contains(url, "health?") ||
+		strings.Contains(url, "ready?") ||
+		strings.Contains(url, "alive?") ||
+		strings.Contains(url, "ping?") {
+		return true
 	}
 
 	urlLower := strings.ToLower(url)
@@ -1140,9 +1255,6 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 
 	// Skip health check endpoints
 	if event.URL != "" && IsHealthCheck(event.URL) {
-		t.logger.WithFields(logrus.Fields{
-			"url": event.URL,
-		}).Debug("Skipping health check endpoint")
 		return
 	}
 
@@ -1176,6 +1288,13 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 	} else if event.Type == EventTypeSSLRead || event.Type == EventTypeSocketRead {
 		// It's a response - look for the matching request
 		if req, ok := t.connections[connKey]; ok {
+			// Skip health check endpoints
+			if req.URL != "" && IsHealthCheck(req.URL) {
+				// Remove the request from the map and silently return
+				delete(t.connections, connKey)
+				return
+			}
+
 			// We found a matching request, create a transaction
 			tx := HTTPTransaction{
 				Request:     req,
@@ -1193,24 +1312,16 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 
 			// Only log transactions for relevant applications at INFO level
 			if IsRelevantApplication(tx.ProcessName, tx.Command) {
-				// Skip health check URLs even for relevant applications
-				if req.URL != "" && IsHealthCheck(req.URL) {
-					t.logger.WithFields(logrus.Fields{
-						"method": req.Method,
-						"url":    req.URL,
-					}).Debug("Skipping health check transaction")
-				} else {
-					// Log the complete transaction with better formatting
-					t.logger.WithFields(logrus.Fields{
-						"method":      req.Method,
-						"url":         req.URL,
-						"status_code": event.StatusCode,
-						"duration_ms": tx.Duration.Milliseconds(),
-						"process":     tx.ProcessName,
-						"request":     reqFormatted,
-						"response":    respFormatted,
-					}).Info("HTTP Transaction completed")
-				}
+				// Log the complete transaction with better formatting
+				t.logger.WithFields(logrus.Fields{
+					"method":      req.Method,
+					"url":         req.URL,
+					"status_code": event.StatusCode,
+					"duration_ms": tx.Duration.Milliseconds(),
+					"process":     tx.ProcessName,
+					"request":     reqFormatted,
+					"response":    respFormatted,
+				}).Info("HTTP Transaction completed")
 			} else {
 				// More concise log for less relevant applications at DEBUG level
 				t.logger.WithFields(logrus.Fields{
@@ -1222,8 +1333,8 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 				}).Debug("HTTP Transaction completed")
 			}
 
-			// Store the transaction only if it's not a health check
-			if t.storage != nil && (req.URL == "" || !IsHealthCheck(req.URL)) {
+			// Store the transaction
+			if t.storage != nil {
 				if err := t.storage.StoreTransaction(tx); err != nil {
 					t.logger.WithError(err).Error("Failed to store HTTP transaction")
 				}
