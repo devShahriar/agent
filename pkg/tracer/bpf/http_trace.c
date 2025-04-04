@@ -15,6 +15,9 @@ typedef unsigned long long __u64;
 typedef signed long long __s64;
 typedef unsigned long size_t;
 
+// Define NULL since we don't include standard headers
+#define NULL ((void *)0)
+
 // BPF map types and helpers
 #define BPF_MAP_TYPE_HASH 1
 #define BPF_MAP_TYPE_PERCPU_ARRAY 6
