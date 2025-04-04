@@ -146,50 +146,6 @@ static __always_inline int is_http_data(const char *data, size_t len) {
     return 0;
 }
 
-// Structure for TCP message header
-struct tcp_msg {
-    struct msghdr *msg;
-    size_t size;
-    struct iovec *iov;
-    size_t iovlen;
-};
-
-// Helper to read from iovec safely
-static __always_inline int read_iovec_data(void *dst, struct iovec *iov, size_t iovlen, size_t max_size) {
-    if (iovlen == 0 || !iov) {
-        return -1;
-    }
-
-    // Read the first iovec entry
-    struct iovec first_iov;
-    if (bpf_probe_read_kernel(&first_iov, sizeof(first_iov), iov) < 0) {
-        bpf_printk("Failed to read iovec");
-        return -1;
-    }
-
-    // Get the data and length
-    void *iov_base = first_iov.iov_base;
-    size_t iov_len = first_iov.iov_len;
-    
-    if (!iov_base || iov_len == 0) {
-        bpf_printk("Invalid iovec: base=%p len=%d", iov_base, iov_len);
-        return -1;
-    }
-
-    // Cap the length to our maximum
-    if (iov_len > max_size) {
-        iov_len = max_size;
-    }
-
-    // Try to read the data
-    if (bpf_probe_read_user(dst, iov_len, iov_base) < 0) {
-        bpf_printk("Failed to read iovec data");
-        return -1;
-    }
-
-    return iov_len;
-}
-
 // Trace SSL_read
 SEC("uprobe/libssl.so.3:SSL_read")
 int trace_ssl_read(struct pt_regs *ctx) {
