@@ -620,6 +620,11 @@ func (t *Tracer) getProcessInfo(pid uint32) (name, cmdLine string) {
 
 // parseHTTPData parses HTTP data from the event
 func parseHTTPData(event *HTTPEvent) {
+	// Safety check to ensure we don't exceed buffer bounds
+	if event.DataLen == 0 || event.DataLen > uint32(len(event.Data)) {
+		return
+	}
+
 	data := string(event.Data[:event.DataLen])
 	lines := strings.Split(data, "\r\n")
 	if len(lines) == 0 {
@@ -699,7 +704,19 @@ func (t *Tracer) pollEvents() {
 			httpEvent.Timestamp = bpfData.Timestamp
 			httpEvent.ConnID = bpfData.FD
 			httpEvent.Type = bpfData.Type
-			httpEvent.DataLen = bpfData.DataLen
+
+			// Ensure data length is valid (cap at buffer size)
+			if bpfData.DataLen > uint32(len(httpEvent.Data)) {
+				t.logger.WithFields(logrus.Fields{
+					"pid":         bpfData.PID,
+					"claimed_len": bpfData.DataLen,
+					"max_len":     len(httpEvent.Data),
+				}).Warn("Received oversized data length, truncating")
+				httpEvent.DataLen = uint32(len(httpEvent.Data))
+			} else {
+				httpEvent.DataLen = bpfData.DataLen
+			}
+
 			copy(httpEvent.Data[:], bpfData.Data[:])
 
 			t.logger.WithFields(logrus.Fields{
