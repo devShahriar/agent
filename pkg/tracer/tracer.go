@@ -627,6 +627,8 @@ func (t *Tracer) pollEvents() {
 				continue
 			}
 
+			t.logger.WithField("record", record).Debug("Received perf event")
+
 			// Parse the event
 			var event HTTPEvent
 			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
@@ -634,13 +636,33 @@ func (t *Tracer) pollEvents() {
 				continue
 			}
 
+			t.logger.WithFields(logrus.Fields{
+				"pid":     event.PID,
+				"tid":     event.TID,
+				"type":    event.Type,
+				"conn_id": event.ConnID,
+			}).Debug("Parsed HTTP event")
+
 			// Get process info
 			name, cmdLine := t.getProcessInfo(event.PID)
 			event.ProcessName = name
 			event.Command = cmdLine
 
+			t.logger.WithFields(logrus.Fields{
+				"pid":          event.PID,
+				"process_name": event.ProcessName,
+				"command":      event.Command,
+			}).Debug("Retrieved process info")
+
 			// Parse HTTP data
 			parseHTTPData(&event)
+
+			t.logger.WithFields(logrus.Fields{
+				"pid":         event.PID,
+				"method":      event.Method,
+				"url":         event.URL,
+				"status_code": event.StatusCode,
+			}).Debug("Parsed HTTP data")
 
 			// Log the event
 			t.logger.WithFields(logrus.Fields{
@@ -655,7 +677,7 @@ func (t *Tracer) pollEvents() {
 				"content_type": event.ContentType,
 				"data_len":     event.DataLen,
 				"data":         string(event.Data[:event.DataLen]),
-			}).Debug("HTTP event received")
+			}).Info("HTTP event received")
 
 			// Call the callback if set
 			if t.eventCallback != nil {

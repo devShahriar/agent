@@ -159,6 +159,7 @@ int trace_accept4(struct pt_regs *ctx) {
     __u32 zero = 0;
     http_event_t *event = bpf_map_lookup_elem(&event_storage, &zero);
     if (!event) {
+        bpf_printk("trace_accept4: failed to get event from storage");
         return 0;
     }
 
@@ -185,6 +186,8 @@ int trace_accept4(struct pt_regs *ctx) {
     _Bool t = 1;
     bpf_map_update_elem(&active_fds, &sockfd, &t, BPF_ANY);
 
+    bpf_printk("trace_accept4: pid=%d tid=%d sockfd=%d", event->pid, event->tid, sockfd);
+
     return 0;
 }
 
@@ -194,6 +197,7 @@ int trace_write(struct pt_regs *ctx) {
     __u32 zero = 0;
     http_event_t *event = bpf_map_lookup_elem(&event_storage, &zero);
     if (!event) {
+        bpf_printk("trace_write: failed to get event from storage");
         return 0;
     }
 
@@ -204,6 +208,7 @@ int trace_write(struct pt_regs *ctx) {
     // Check if this is an active file descriptor
     _Bool *is_active = bpf_map_lookup_elem(&active_fds, &fd);
     if (!is_active) {
+        bpf_printk("trace_write: fd=%d not active", fd);
         return 0;
     }
     
@@ -215,15 +220,6 @@ int trace_write(struct pt_regs *ctx) {
     event->conn_id = fd;
     event->data_len = 0;
 
-    // Get process name for debugging
-    char comm[16];
-    bpf_get_current_comm(&comm, sizeof(comm));
-    
-    // Debug log
-    bpf_printk("write from %s", comm);
-    bpf_printk("pid=%d fd=%d", event->pid, fd);
-    bpf_printk("len=%d", len);
-
     // Try to read the data
     if (buf != NULL && len > 0) {
         // Cap the length
@@ -234,22 +230,19 @@ int trace_write(struct pt_regs *ctx) {
 
         // Try to read the data
         if (bpf_probe_read_user(event->data, len, buf) < 0) {
-            bpf_printk("write: failed to read buffer");
+            bpf_printk("trace_write: failed to read buffer for fd=%d", fd);
             return 0;
-        }
-
-        // Log the first few bytes for debugging
-        if (len >= 4) {
-            // Split the logging into two calls
-            bpf_printk("write data (1/2): %c%c", event->data[0], event->data[1]);
-            bpf_printk("write data (2/2): %c%c", event->data[2], event->data[3]);
         }
 
         // Check if it's HTTP
         if (is_http_data(event->data, event->data_len)) {
-            bpf_printk("write: sending HTTP event from %s", comm);
+            bpf_printk("trace_write: found HTTP data for pid=%d fd=%d len=%d", event->pid, fd, len);
             bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, event, sizeof(*event));
+        } else {
+            bpf_printk("trace_write: non-HTTP data for pid=%d fd=%d len=%d", event->pid, fd, len);
         }
+    } else {
+        bpf_printk("trace_write: no data for pid=%d fd=%d", event->pid, fd);
     }
 
     return 0;
@@ -261,6 +254,7 @@ int trace_read(struct pt_regs *ctx) {
     __u32 zero = 0;
     http_event_t *event = bpf_map_lookup_elem(&event_storage, &zero);
     if (!event) {
+        bpf_printk("trace_read: failed to get event from storage");
         return 0;
     }
 
@@ -271,6 +265,7 @@ int trace_read(struct pt_regs *ctx) {
     // Check if this is an active file descriptor
     _Bool *is_active = bpf_map_lookup_elem(&active_fds, &fd);
     if (!is_active) {
+        bpf_printk("trace_read: fd=%d not active", fd);
         return 0;
     }
     
@@ -282,15 +277,6 @@ int trace_read(struct pt_regs *ctx) {
     event->conn_id = fd;
     event->data_len = 0;
 
-    // Get process name for debugging
-    char comm[16];
-    bpf_get_current_comm(&comm, sizeof(comm));
-    
-    // Debug log
-    bpf_printk("read from %s", comm);
-    bpf_printk("pid=%d fd=%d", event->pid, fd);
-    bpf_printk("len=%d", len);
-
     // Try to read the data
     if (buf != NULL && len > 0) {
         // Cap the length
@@ -301,22 +287,19 @@ int trace_read(struct pt_regs *ctx) {
 
         // Try to read the data
         if (bpf_probe_read_user(event->data, len, buf) < 0) {
-            bpf_printk("read: failed to read buffer");
+            bpf_printk("trace_read: failed to read buffer for fd=%d", fd);
             return 0;
-        }
-
-        // Log the first few bytes for debugging
-        if (len >= 4) {
-            // Split the logging into two calls
-            bpf_printk("read data (1/2): %c%c", event->data[0], event->data[1]);
-            bpf_printk("read data (2/2): %c%c", event->data[2], event->data[3]);
         }
 
         // Check if it's HTTP
         if (is_http_data(event->data, event->data_len)) {
-            bpf_printk("read: sending HTTP event from %s", comm);
+            bpf_printk("trace_read: found HTTP data for pid=%d fd=%d len=%d", event->pid, fd, len);
             bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, event, sizeof(*event));
+        } else {
+            bpf_printk("trace_read: non-HTTP data for pid=%d fd=%d len=%d", event->pid, fd, len);
         }
+    } else {
+        bpf_printk("trace_read: no data for pid=%d fd=%d", event->pid, fd);
     }
 
     return 0;
@@ -330,6 +313,7 @@ int trace_close(struct pt_regs *ctx) {
     // Check if this is an active file descriptor
     _Bool *is_active = bpf_map_lookup_elem(&active_fds, &fd);
     if (!is_active) {
+        bpf_printk("trace_close: fd=%d not active", fd);
         return 0;
     }
     
@@ -338,6 +322,8 @@ int trace_close(struct pt_regs *ctx) {
     
     // Remove from active file descriptors
     bpf_map_delete_elem(&active_fds, &fd);
+
+    bpf_printk("trace_close: closed fd=%d", fd);
 
     return 0;
 }
