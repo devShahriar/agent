@@ -839,7 +839,7 @@ func parseHTTPData(event *HTTPEvent) {
 
 // formatHTTPData returns a human-readable formatted version of HTTP data
 func formatHTTPData(event *HTTPEvent) string {
-	if event.DataLen == 0 {
+	if event == nil || event.DataLen == 0 {
 		return ""
 	}
 
@@ -946,6 +946,11 @@ func formatHTTPData(event *HTTPEvent) string {
 	return formatted.String()
 }
 
+// FormatHTTPData is the exported version of formatHTTPData
+func FormatHTTPData(event *HTTPEvent) string {
+	return formatHTTPData(event)
+}
+
 // pollEvents reads events from the perf buffer
 func (t *Tracer) pollEvents() {
 	var httpEvent HTTPEvent
@@ -970,6 +975,9 @@ func (t *Tracer) pollEvents() {
 				t.logger.Debug("Skipping empty or too small record")
 				continue
 			}
+
+			t.logger.WithField("record_size", len(record.RawSample)).
+				Debug("Received perf event")
 
 			// Create a temp struct that matches the BPF binary format
 			type bpfEvent struct {
@@ -1003,8 +1011,7 @@ func (t *Tracer) pollEvents() {
 				continue
 			}
 
-			// Filter out suspiciously large data lengths (likely garbage data)
-			// Known garbage data sizes from kubernetes components
+			// Filter only known large garbage sizes, but keep logging for debugging
 			knownGarbageSizes := []uint32{1543503872, 1979711488}
 			isKnownGarbage := false
 			for _, size := range knownGarbageSizes {
@@ -1014,9 +1021,17 @@ func (t *Tracer) pollEvents() {
 				}
 			}
 
-			if isKnownGarbage || bpfData.DataLen > 1000000 {
-				// Just silently skip - no logging even at debug level
+			if isKnownGarbage {
+				// Silently skip known garbage
 				continue
+			}
+
+			// Log large data sizes but don't filter out all large packets
+			if bpfData.DataLen > 10000 {
+				t.logger.WithFields(logrus.Fields{
+					"pid":         bpfData.PID,
+					"claimed_len": bpfData.DataLen,
+				}).Debug("Large data size detected")
 			}
 
 			// Convert to our HTTPEvent struct
@@ -1028,7 +1043,11 @@ func (t *Tracer) pollEvents() {
 
 			// Ensure data length is valid (cap at buffer size)
 			if bpfData.DataLen > uint32(len(httpEvent.Data)) {
-				// Silently truncate without logging
+				t.logger.WithFields(logrus.Fields{
+					"pid":         bpfData.PID,
+					"claimed_len": bpfData.DataLen,
+					"max_len":     len(httpEvent.Data),
+				}).Debug("Truncating oversized data length")
 				httpEvent.DataLen = uint32(len(httpEvent.Data))
 			} else {
 				httpEvent.DataLen = bpfData.DataLen
@@ -1047,20 +1066,25 @@ func (t *Tracer) pollEvents() {
 			httpEvent.ProcessName = name
 			httpEvent.Command = cmdLine
 
-			// Skip events from ignored processes (CoreDNS, kubelet, etc.)
-			if !IsRelevantApplication(httpEvent.ProcessName, httpEvent.Command) {
-				// Silently skip kubernetes processes
+			// Log the raw event data to help with debugging
+			t.logger.WithFields(logrus.Fields{
+				"pid":          httpEvent.PID,
+				"process_name": httpEvent.ProcessName,
+				"command":      httpEvent.Command,
+				"data_len":     httpEvent.DataLen,
+				"conn_id":      httpEvent.ConnID,
+				"type":         httpEvent.Type,
+				"timestamp":    httpEvent.Timestamp,
+			}).Debug("Raw event details")
+
+			// Skip coredns only - as it generates too much noise
+			if httpEvent.ProcessName == "coredns" ||
+				strings.Contains(strings.ToLower(httpEvent.Command), "coredns") {
 				continue
 			}
 
 			// Parse HTTP data
 			parseHTTPData(&httpEvent)
-
-			// Skip health check endpoints
-			if httpEvent.URL != "" && IsHealthCheck(httpEvent.URL) {
-				// Skip silently
-				continue
-			}
 
 			t.logger.WithFields(logrus.Fields{
 				"pid":         httpEvent.PID,
@@ -1070,6 +1094,7 @@ func (t *Tracer) pollEvents() {
 			}).Debug("Parsed HTTP data")
 
 			// Log the event
+			formattedData := formatHTTPData(&httpEvent)
 			t.logger.WithFields(logrus.Fields{
 				"type":         httpEvent.Type,
 				"pid":          httpEvent.PID,
@@ -1081,6 +1106,7 @@ func (t *Tracer) pollEvents() {
 				"status_code":  httpEvent.StatusCode,
 				"content_type": httpEvent.ContentType,
 				"data_len":     httpEvent.DataLen,
+				"http_data":    formattedData,
 			}).Info("HTTP event received")
 
 			// Handle the event - track request and response pairs
@@ -1253,11 +1279,6 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 	t.connMu.Lock()
 	defer t.connMu.Unlock()
 
-	// Skip health check endpoints
-	if event.URL != "" && IsHealthCheck(event.URL) {
-		return
-	}
-
 	// Create connection key from process ID and connection ID
 	connKey := fmt.Sprintf("%d:%d", event.PID, event.ConnID)
 
@@ -1269,32 +1290,16 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 		// Store the request in the connection map
 		t.connections[connKey] = event
 
-		// Only log detailed debug info for relevant applications
-		if IsRelevantApplication(event.ProcessName, event.Command) {
-			t.logger.WithFields(logrus.Fields{
-				"conn_key": connKey,
-				"method":   event.Method,
-				"url":      event.URL,
-				"data":     formattedData,
-			}).Debug("Stored HTTP request")
-		} else {
-			// Simplified log for less relevant applications
-			t.logger.WithFields(logrus.Fields{
-				"conn_key": connKey,
-				"method":   event.Method,
-				"url":      event.URL,
-			}).Debug("Stored HTTP request")
-		}
+		// Log information about the request
+		t.logger.WithFields(logrus.Fields{
+			"conn_key": connKey,
+			"method":   event.Method,
+			"url":      event.URL,
+			"data":     formattedData,
+		}).Debug("Stored HTTP request")
 	} else if event.Type == EventTypeSSLRead || event.Type == EventTypeSocketRead {
 		// It's a response - look for the matching request
 		if req, ok := t.connections[connKey]; ok {
-			// Skip health check endpoints
-			if req.URL != "" && IsHealthCheck(req.URL) {
-				// Remove the request from the map and silently return
-				delete(t.connections, connKey)
-				return
-			}
-
 			// We found a matching request, create a transaction
 			tx := HTTPTransaction{
 				Request:     req,
@@ -1310,28 +1315,17 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 			reqFormatted := formatHTTPData(req)
 			respFormatted := formattedData
 
-			// Only log transactions for relevant applications at INFO level
-			if IsRelevantApplication(tx.ProcessName, tx.Command) {
-				// Log the complete transaction with better formatting
-				t.logger.WithFields(logrus.Fields{
-					"method":      req.Method,
-					"url":         req.URL,
-					"status_code": event.StatusCode,
-					"duration_ms": tx.Duration.Milliseconds(),
-					"process":     tx.ProcessName,
-					"request":     reqFormatted,
-					"response":    respFormatted,
-				}).Info("HTTP Transaction completed")
-			} else {
-				// More concise log for less relevant applications at DEBUG level
-				t.logger.WithFields(logrus.Fields{
-					"method":      req.Method,
-					"url":         req.URL,
-					"status_code": event.StatusCode,
-					"duration_ms": tx.Duration.Milliseconds(),
-					"process":     tx.ProcessName,
-				}).Debug("HTTP Transaction completed")
-			}
+			// Log the complete transaction
+			t.logger.WithFields(logrus.Fields{
+				"method":      req.Method,
+				"url":         req.URL,
+				"status_code": event.StatusCode,
+				"duration_ms": tx.Duration.Milliseconds(),
+				"process":     tx.ProcessName,
+				"request":     reqFormatted,
+				"response":    respFormatted,
+				"conn_key":    connKey,
+			}).Info("HTTP Transaction completed")
 
 			// Store the transaction
 			if t.storage != nil {
@@ -1344,20 +1338,11 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 			delete(t.connections, connKey)
 		} else {
 			// We got a response without a matching request
-			// Only log detailed orphaned responses for relevant applications
-			if IsRelevantApplication(event.ProcessName, event.Command) {
-				t.logger.WithFields(logrus.Fields{
-					"conn_key":    connKey,
-					"status_code": event.StatusCode,
-					"data":        formattedData,
-				}).Debug("Received orphaned HTTP response")
-			} else {
-				// Minimal log for less relevant applications
-				t.logger.WithFields(logrus.Fields{
-					"conn_key":    connKey,
-					"status_code": event.StatusCode,
-				}).Debug("Received orphaned HTTP response")
-			}
+			t.logger.WithFields(logrus.Fields{
+				"conn_key":    connKey,
+				"status_code": event.StatusCode,
+				"data":        formattedData,
+			}).Debug("Received orphaned HTTP response")
 		}
 	}
 

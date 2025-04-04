@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -104,22 +105,50 @@ func main() {
 
 	// Set up event callback
 	t.SetEventCallback(func(event tracer.HTTPEvent) {
-		// Skip all Kubernetes related processes
-		if !tracer.IsRelevantApplication(event.ProcessName, event.Command) {
+		// Add debug logging to see what traffic is being received
+		log.WithFields(logrus.Fields{
+			"pid":          event.PID,
+			"process_name": event.ProcessName,
+			"command":      event.Command,
+			"method":       event.Method,
+			"url":          event.URL,
+		}).Debug("Received event before filtering")
+
+		// Filter well-known Kubernetes processes only
+		isK8s := false
+		k8sProcesses := []string{
+			"kubelet",
+			"kube-proxy",
+			"coredns",
+			"etcd",
+			"kube-apiserver",
+		}
+		for _, proc := range k8sProcesses {
+			if strings.Contains(strings.ToLower(event.ProcessName), proc) {
+				isK8s = true
+				break
+			}
+		}
+
+		if isK8s {
+			log.WithField("process", event.ProcessName).
+				Debug("Skipping Kubernetes system process")
 			return
 		}
 
-		// Skip all health check and Kubernetes API endpoints
-		if event.URL != "" && tracer.IsHealthCheck(event.URL) {
+		// Skip only obvious health check endpoints
+		if event.URL != "" && (strings.Contains(strings.ToLower(event.URL), "/healthz") ||
+			strings.Contains(strings.ToLower(event.URL), "/health") ||
+			strings.Contains(strings.ToLower(event.URL), "/ready") ||
+			strings.Contains(strings.ToLower(event.URL), "/metrics")) {
+			log.WithField("url", event.URL).Debug("Skipping health check endpoint")
 			return
 		}
 
-		// Skip if PID is too high (likely containerized system processes)
-		if event.PID > 100000 {
-			return
-		}
+		// Format the HTTP data for human-readable output
+		formattedData := tracer.FormatHTTPData(&event)
 
-		// Log event summary for relevant applications only
+		// Log event summary for all applications with formatted HTTP data
 		log.WithFields(logrus.Fields{
 			"type":         event.Type,
 			"pid":          event.PID,
@@ -127,6 +156,7 @@ func main() {
 			"method":       event.Method,
 			"url":          event.URL,
 			"status_code":  event.StatusCode,
+			"http_data":    formattedData,
 		}).Info("HTTP event received")
 
 		// Store event
