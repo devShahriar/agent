@@ -50,6 +50,14 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } events SEC(".maps") = {};
 
+// Per-CPU array map for event storage
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(http_event_t));
+    __uint(max_entries, 1);
+} event_storage SEC(".maps") = {};
+
 // Map to store connection state
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -144,22 +152,29 @@ static __always_inline int is_http_data(const char *data, size_t len) {
 // Trace accept4 syscall
 SEC("kprobe/sys_accept4")
 int trace_accept4(struct pt_regs *ctx) {
-    http_event_t event = {};
+    __u32 zero = 0;
+    http_event_t *event = bpf_map_lookup_elem(&event_storage, &zero);
+    if (!event) {
+        return 0;
+    }
+
     int sockfd = (int)ctx->rdi;
     
     // Get process info
-    event.pid = bpf_get_current_pid_tgid() >> 32;
-    event.tid = (__u32)bpf_get_current_pid_tgid();
-    event.timestamp = bpf_ktime_get_ns();
-    event.type = EVENT_TYPE_CONNECT;
-    event.conn_id = sockfd;
+    event->pid = bpf_get_current_pid_tgid() >> 32;
+    event->tid = (__u32)bpf_get_current_pid_tgid();
+    event->timestamp = bpf_ktime_get_ns();
+    event->type = EVENT_TYPE_CONNECT;
+    event->conn_id = sockfd;
+    event->data_len = 0;
 
     // Get process name for debugging
     char comm[16];
     bpf_get_current_comm(&comm, sizeof(comm));
     
     // Debug log
-    bpf_printk("accept4 from %s (pid=%d sockfd=%d)", comm, event.pid, sockfd);
+    bpf_printk("accept4 from %s", comm);
+    bpf_printk("pid=%d sockfd=%d", event->pid, sockfd);
 
     // Store the file descriptor as active
     _Bool t = 1;
@@ -171,7 +186,12 @@ int trace_accept4(struct pt_regs *ctx) {
 // Trace write syscall
 SEC("kprobe/sys_write")
 int trace_write(struct pt_regs *ctx) {
-    http_event_t event = {};
+    __u32 zero = 0;
+    http_event_t *event = bpf_map_lookup_elem(&event_storage, &zero);
+    if (!event) {
+        return 0;
+    }
+
     int fd = (int)ctx->rdi;
     void *buf = (void *)ctx->rsi;
     size_t len = (size_t)ctx->rdx;
@@ -183,18 +203,21 @@ int trace_write(struct pt_regs *ctx) {
     }
     
     // Get process info
-    event.pid = bpf_get_current_pid_tgid() >> 32;
-    event.tid = (__u32)bpf_get_current_pid_tgid();
-    event.timestamp = bpf_ktime_get_ns();
-    event.type = EVENT_TYPE_SOCKET_WRITE;
-    event.conn_id = fd;
+    event->pid = bpf_get_current_pid_tgid() >> 32;
+    event->tid = (__u32)bpf_get_current_pid_tgid();
+    event->timestamp = bpf_ktime_get_ns();
+    event->type = EVENT_TYPE_SOCKET_WRITE;
+    event->conn_id = fd;
+    event->data_len = 0;
 
     // Get process name for debugging
     char comm[16];
     bpf_get_current_comm(&comm, sizeof(comm));
     
     // Debug log
-    bpf_printk("write from %s (pid=%d fd=%d len=%d)", comm, event.pid, fd, len);
+    bpf_printk("write from %s", comm);
+    bpf_printk("pid=%d fd=%d", event->pid, fd);
+    bpf_printk("len=%d", len);
 
     // Try to read the data
     if (buf != NULL && len > 0) {
@@ -202,10 +225,10 @@ int trace_write(struct pt_regs *ctx) {
         if (len > MAX_MSG_SIZE) {
             len = MAX_MSG_SIZE;
         }
-        event.data_len = len;
+        event->data_len = len;
 
         // Try to read the data
-        if (bpf_probe_read_user(event.data, len, buf) < 0) {
+        if (bpf_probe_read_user(event->data, len, buf) < 0) {
             bpf_printk("write: failed to read buffer");
             return 0;
         }
@@ -213,14 +236,14 @@ int trace_write(struct pt_regs *ctx) {
         // Log the first few bytes for debugging
         if (len >= 4) {
             // Split the logging into two calls
-            bpf_printk("write data (1/2): %c%c", event.data[0], event.data[1]);
-            bpf_printk("write data (2/2): %c%c", event.data[2], event.data[3]);
+            bpf_printk("write data (1/2): %c%c", event->data[0], event->data[1]);
+            bpf_printk("write data (2/2): %c%c", event->data[2], event->data[3]);
         }
 
         // Check if it's HTTP
-        if (is_http_data(event.data, event.data_len)) {
+        if (is_http_data(event->data, event->data_len)) {
             bpf_printk("write: sending HTTP event from %s", comm);
-            bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, event, sizeof(*event));
         }
     }
 
@@ -230,7 +253,12 @@ int trace_write(struct pt_regs *ctx) {
 // Trace read syscall
 SEC("kprobe/sys_read")
 int trace_read(struct pt_regs *ctx) {
-    http_event_t event = {};
+    __u32 zero = 0;
+    http_event_t *event = bpf_map_lookup_elem(&event_storage, &zero);
+    if (!event) {
+        return 0;
+    }
+
     int fd = (int)ctx->rdi;
     void *buf = (void *)ctx->rsi;
     size_t len = (size_t)ctx->rdx;
@@ -242,18 +270,21 @@ int trace_read(struct pt_regs *ctx) {
     }
     
     // Get process info
-    event.pid = bpf_get_current_pid_tgid() >> 32;
-    event.tid = (__u32)bpf_get_current_pid_tgid();
-    event.timestamp = bpf_ktime_get_ns();
-    event.type = EVENT_TYPE_SOCKET_READ;
-    event.conn_id = fd;
+    event->pid = bpf_get_current_pid_tgid() >> 32;
+    event->tid = (__u32)bpf_get_current_pid_tgid();
+    event->timestamp = bpf_ktime_get_ns();
+    event->type = EVENT_TYPE_SOCKET_READ;
+    event->conn_id = fd;
+    event->data_len = 0;
 
     // Get process name for debugging
     char comm[16];
     bpf_get_current_comm(&comm, sizeof(comm));
     
     // Debug log
-    bpf_printk("read from %s (pid=%d fd=%d len=%d)", comm, event.pid, fd, len);
+    bpf_printk("read from %s", comm);
+    bpf_printk("pid=%d fd=%d", event->pid, fd);
+    bpf_printk("len=%d", len);
 
     // Try to read the data
     if (buf != NULL && len > 0) {
@@ -261,10 +292,10 @@ int trace_read(struct pt_regs *ctx) {
         if (len > MAX_MSG_SIZE) {
             len = MAX_MSG_SIZE;
         }
-        event.data_len = len;
+        event->data_len = len;
 
         // Try to read the data
-        if (bpf_probe_read_user(event.data, len, buf) < 0) {
+        if (bpf_probe_read_user(event->data, len, buf) < 0) {
             bpf_printk("read: failed to read buffer");
             return 0;
         }
@@ -272,14 +303,14 @@ int trace_read(struct pt_regs *ctx) {
         // Log the first few bytes for debugging
         if (len >= 4) {
             // Split the logging into two calls
-            bpf_printk("read data (1/2): %c%c", event.data[0], event.data[1]);
-            bpf_printk("read data (2/2): %c%c", event.data[2], event.data[3]);
+            bpf_printk("read data (1/2): %c%c", event->data[0], event->data[1]);
+            bpf_printk("read data (2/2): %c%c", event->data[2], event->data[3]);
         }
 
         // Check if it's HTTP
-        if (is_http_data(event.data, event.data_len)) {
+        if (is_http_data(event->data, event->data_len)) {
             bpf_printk("read: sending HTTP event from %s", comm);
-            bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, event, sizeof(*event));
         }
     }
 
