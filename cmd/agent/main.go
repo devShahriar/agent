@@ -158,11 +158,6 @@ func main() {
 			"status_code":  event.StatusCode,
 			"http_data":    formattedData,
 		}).Info("HTTP event received")
-
-		// Store event
-		if err := storage.Store(event); err != nil {
-			log.WithError(err).Error("Failed to store event")
-		}
 	})
 
 	// Start tracer

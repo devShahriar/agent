@@ -452,6 +452,10 @@ type Tracer struct {
 	connMu      sync.RWMutex
 	connections map[string]*HTTPEvent
 
+	// Alternative connection tracking for backup correlation
+	altConnMu  sync.RWMutex
+	altConnMap map[string]*HTTPEvent
+
 	// Process info cache to avoid repeated lookups
 	procMu    sync.RWMutex
 	procCache map[uint32]processInfo
@@ -513,6 +517,7 @@ func NewTracer(
 		stopChan:      make(chan struct{}),
 		uprobes:       make([]link.Link, 0),
 		connections:   make(map[string]*HTTPEvent),
+		altConnMap:    make(map[string]*HTTPEvent),
 		procCache:     make(map[uint32]processInfo),
 	}
 
@@ -960,27 +965,21 @@ func FormatHTTPData(event *HTTPEvent) string {
 	// Create structured data for JSON output
 	result := make(map[string]interface{})
 
-	// Parse headers and body
-	headers := make(map[string]string)
-	var bodyContent string
-
-	// Track request/response info
-	var queryParams map[string]string
-
 	// Parse first line for request/response info
 	if len(lines[0]) > 0 {
 		if strings.HasPrefix(lines[0], "HTTP/") {
 			// This is a response
+			result["type"] = "response"
 			parts := strings.SplitN(lines[0], " ", 3)
 			if len(parts) >= 2 {
-				statusMessage := parts[1]
+				result["status_code"] = parts[1]
 				if len(parts) >= 3 {
-					statusMessage += " " + parts[2]
+					result["status_message"] = parts[2]
 				}
-				result["response_status"] = statusMessage
 			}
 		} else {
 			// This is a request
+			result["type"] = "request"
 			parts := strings.SplitN(lines[0], " ", 3)
 			if len(parts) >= 2 {
 				result["method"] = parts[0]
@@ -993,7 +992,7 @@ func FormatHTTPData(event *HTTPEvent) string {
 					queryStr := urlParts[1]
 
 					// Parse query parameters
-					queryParams = make(map[string]string)
+					queryParams := make(map[string]string)
 					params := strings.Split(queryStr, "&")
 					for _, param := range params {
 						if param == "" {
@@ -1012,18 +1011,24 @@ func FormatHTTPData(event *HTTPEvent) string {
 					result["path"] = urlStr
 				}
 			}
+
+			// Add protocol version if present in the first line
+			if len(parts) >= 3 {
+				result["protocol"] = parts[2]
+			}
 		}
 	}
 
 	// Parse headers
+	headers := make(map[string]string)
 	inHeaders := true
-	headerEnd := false
+	headerEnd := -1
 
 	for i := 1; i < len(lines); i++ {
 		if lines[i] == "" {
 			inHeaders = false
-			headerEnd = true
-			continue
+			headerEnd = i
+			break
 		}
 
 		if inHeaders {
@@ -1033,33 +1038,47 @@ func FormatHTTPData(event *HTTPEvent) string {
 				value := strings.TrimSpace(parts[1])
 				headers[key] = value
 			}
-		} else if headerEnd {
-			// We're in the body
-			if bodyContent == "" {
-				bodyContent = lines[i]
-			} else {
-				bodyContent += "\n" + lines[i]
-			}
 		}
 	}
 
 	result["headers"] = headers
 
 	// Process body if present
-	if bodyContent != "" {
-		// Try to detect and format JSON
+	if headerEnd > 0 && headerEnd < len(lines)-1 {
+		// Join all lines after the headers as the body
+		bodyLines := lines[headerEnd+1:]
+		bodyContent := strings.Join(bodyLines, "\n")
+
+		// Try to detect JSON body
 		contentType, hasContentType := headers["Content-Type"]
 		if hasContentType && strings.Contains(contentType, "application/json") {
-			var jsonData interface{}
-			if err := json.Unmarshal([]byte(bodyContent), &jsonData); err == nil {
-				// Add parsed JSON body
-				result["body"] = jsonData
+			// Look for the end of the valid JSON by finding closing brace/bracket
+			// This helps handle cases where garbage data might be appended
+			lastBrace := strings.LastIndex(bodyContent, "}")
+			lastBracket := strings.LastIndex(bodyContent, "]")
+			endPos := -1
+
+			if lastBrace > lastBracket {
+				endPos = lastBrace + 1
+			} else if lastBracket > -1 {
+				endPos = lastBracket + 1
+			}
+
+			if endPos > 0 {
+				cleanJSON := bodyContent[:endPos]
+				var jsonData interface{}
+				if err := json.Unmarshal([]byte(cleanJSON), &jsonData); err == nil {
+					// Add parsed JSON body
+					result["body"] = jsonData
+				} else {
+					// If JSON parsing fails, use raw content
+					result["body"] = bodyContent
+				}
 			} else {
-				// Add raw body
 				result["body"] = bodyContent
 			}
 		} else {
-			// Add raw body for non-JSON content
+			// For non-JSON content types
 			result["body"] = bodyContent
 		}
 	}
@@ -1453,24 +1472,76 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 	// Create connection key from process ID and connection ID
 	connKey := fmt.Sprintf("%d:%d", event.PID, event.ConnID)
 
+	// Create alternative connection key based on process and method/URL or status code
+	var altKey string
+	if event.Type == EventTypeSSLWrite || event.Type == EventTypeSocketWrite {
+		// For requests, use process, method and URL
+		altKey = fmt.Sprintf("%s:%s:%s", event.ProcessName, event.Method, event.URL)
+	} else {
+		// For responses, use process and status code
+		altKey = fmt.Sprintf("%s:%d", event.ProcessName, event.StatusCode)
+	}
+
 	// Format the event data for human-readable output
 	formattedData := FormatHTTPData(event)
 
 	// If it's a request (write event)
 	if event.Type == EventTypeSSLWrite || event.Type == EventTypeSocketWrite {
-		// Store the request in the connection map
+		// Store the request in the connection maps
 		t.connections[connKey] = event
+
+		// Also store in the alternative map with a 10-second TTL
+		if altKey != "::" && event.Method != "" && event.URL != "" {
+			t.altConnMu.Lock()
+			t.altConnMap[altKey] = event
+			t.altConnMu.Unlock()
+
+			// Clean up this alt key after 10 seconds
+			go func(key string) {
+				time.Sleep(10 * time.Second)
+				t.altConnMu.Lock()
+				delete(t.altConnMap, key)
+				t.altConnMu.Unlock()
+			}(altKey)
+		}
 
 		// Log information about the request
 		t.logger.WithFields(logrus.Fields{
 			"conn_key": connKey,
+			"alt_key":  altKey,
 			"method":   event.Method,
 			"url":      event.URL,
 			"data":     formattedData,
 		}).Debug("Stored HTTP request")
 	} else if event.Type == EventTypeSSLRead || event.Type == EventTypeSocketRead {
 		// It's a response - look for the matching request
-		if req, ok := t.connections[connKey]; ok {
+		var req *HTTPEvent
+		var ok bool
+		var keyUsed string
+
+		// First try the primary connection key
+		if req, ok = t.connections[connKey]; ok {
+			keyUsed = "primary"
+		} else {
+			// If not found with the primary key, try alternatives
+			t.altConnMu.RLock()
+			// Try to find a matching request in the last 10 seconds
+			// This is less precise but helps with correlation issues
+			for k, v := range t.altConnMap {
+				// Simple heuristic: match by process and URL suffix
+				if strings.HasPrefix(k, event.ProcessName+":") &&
+					strings.Contains(k, event.URL) {
+					req = v
+					keyUsed = "alternative"
+					// Remove this entry to avoid duplicate matches
+					delete(t.altConnMap, k)
+					break
+				}
+			}
+			t.altConnMu.RUnlock()
+		}
+
+		if req != nil {
 			// We found a matching request, create a transaction
 			tx := HTTPTransaction{
 				Request:     req,
@@ -1493,27 +1564,49 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 				"status_code": event.StatusCode,
 				"duration_ms": tx.Duration.Milliseconds(),
 				"process":     tx.ProcessName,
-				"request":     reqFormatted,
-				"response":    respFormatted,
 				"conn_key":    connKey,
+				"key_used":    keyUsed,
+				"req_data":    reqFormatted,
+				"resp_data":   respFormatted,
 			}).Info("HTTP Transaction completed")
 
 			// Store the transaction
 			if t.storage != nil {
 				if err := t.storage.StoreTransaction(tx); err != nil {
 					t.logger.WithError(err).Error("Failed to store HTTP transaction")
+				} else {
+					t.logger.WithFields(logrus.Fields{
+						"method":       req.Method,
+						"url":          req.URL,
+						"status_code":  event.StatusCode,
+						"conn_key":     connKey,
+						"key_used":     keyUsed,
+						"process_name": tx.ProcessName,
+					}).Info("Successfully stored HTTP transaction")
 				}
 			}
 
-			// Remove the request from the map
-			delete(t.connections, connKey)
+			// If we used the primary key, remove it from the map
+			if keyUsed == "primary" {
+				delete(t.connections, connKey)
+			}
 		} else {
 			// We got a response without a matching request
 			t.logger.WithFields(logrus.Fields{
 				"conn_key":    connKey,
+				"alt_key":     altKey,
 				"status_code": event.StatusCode,
+				"pid":         event.PID,
+				"conn_id":     event.ConnID,
 				"data":        formattedData,
 			}).Debug("Received orphaned HTTP response")
+
+			// Print all active connection keys to help debug
+			var keys []string
+			for k := range t.connections {
+				keys = append(keys, k)
+			}
+			t.logger.WithField("active_connections", keys).Debug("Active connection keys")
 		}
 	}
 
@@ -1522,7 +1615,12 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 	for key, req := range t.connections {
 		// If request is older than 30 seconds, remove it
 		if now-int64(req.Timestamp) > 30*int64(time.Second) {
-			t.logger.WithField("conn_key", key).Debug("Removing stale HTTP request")
+			t.logger.WithFields(logrus.Fields{
+				"conn_key": key,
+				"method":   req.Method,
+				"url":      req.URL,
+				"age_sec":  (now - int64(req.Timestamp)) / int64(time.Second),
+			}).Debug("Removing stale HTTP request")
 			delete(t.connections, key)
 		}
 	}
