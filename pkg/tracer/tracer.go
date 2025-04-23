@@ -857,7 +857,18 @@ func parseHTTPData(event *HTTPEvent) {
 		return
 	}
 
-	data := string(event.Data[:event.DataLen])
+	// Clean up the data by removing null bytes and control characters
+	cleanData := make([]byte, 0, event.DataLen)
+	for i := 0; i < int(event.DataLen); i++ {
+		b := event.Data[i]
+		// Skip null bytes and most control characters except newlines, returns, tabs
+		if b == 0 || (b < 32 && b != '\n' && b != '\r' && b != '\t') {
+			continue
+		}
+		cleanData = append(cleanData, b)
+	}
+
+	data := string(cleanData)
 	lines := strings.Split(data, "\r\n")
 	if len(lines) == 0 {
 		return
@@ -903,8 +914,8 @@ func parseHTTPData(event *HTTPEvent) {
 		// This is a request
 		parts := strings.Split(firstLine, " ")
 		if len(parts) >= 2 {
-			event.Method = parts[0]
-			event.URL = parts[1]
+			event.Method = strings.TrimSpace(parts[0])
+			event.URL = strings.TrimSpace(parts[1])
 		}
 	}
 }
@@ -1474,10 +1485,13 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 
 	// Create alternative connection key based on process and method/URL or status code
 	var altKey string
-	if event.Type == EventTypeSSLWrite || event.Type == EventTypeSocketWrite {
+	if strings.HasPrefix(event.Method, "GET") ||
+		strings.HasPrefix(event.Method, "POST") ||
+		strings.HasPrefix(event.Method, "PUT") ||
+		strings.HasPrefix(event.Method, "DELETE") {
 		// For requests, use process, method and URL
 		altKey = fmt.Sprintf("%s:%s:%s", event.ProcessName, event.Method, event.URL)
-	} else {
+	} else if event.StatusCode > 0 {
 		// For responses, use process and status code
 		altKey = fmt.Sprintf("%s:%d", event.ProcessName, event.StatusCode)
 	}
@@ -1485,8 +1499,11 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 	// Format the event data for human-readable output
 	formattedData := FormatHTTPData(event)
 
-	// If it's a request (write event)
-	if event.Type == EventTypeSSLWrite || event.Type == EventTypeSocketWrite {
+	// If it's a request (has a valid HTTP method)
+	if strings.HasPrefix(event.Method, "GET") ||
+		strings.HasPrefix(event.Method, "POST") ||
+		strings.HasPrefix(event.Method, "PUT") ||
+		strings.HasPrefix(event.Method, "DELETE") {
 		// Store the request in the connection maps
 		t.connections[connKey] = event
 
@@ -1513,7 +1530,7 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 			"url":      event.URL,
 			"data":     formattedData,
 		}).Debug("Stored HTTP request")
-	} else if event.Type == EventTypeSSLRead || event.Type == EventTypeSocketRead {
+	} else if event.StatusCode > 0 {
 		// It's a response - look for the matching request
 		var req *HTTPEvent
 		var ok bool
@@ -1526,7 +1543,6 @@ func (t *Tracer) handleHTTPEvent(event *HTTPEvent) {
 			// If not found with the primary key, try alternatives
 			t.altConnMu.RLock()
 			// Try to find a matching request in the last 10 seconds
-			// This is less precise but helps with correlation issues
 			for k, v := range t.altConnMap {
 				// Simple heuristic: match by process and URL suffix
 				if strings.HasPrefix(k, event.ProcessName+":") &&
