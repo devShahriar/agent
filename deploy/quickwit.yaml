@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: quickwit
+  namespace: monitoring
+spec:
+  serviceName: quickwit
+  replicas: 1
+  selector:
+    matchLabels:
+      app: quickwit
+  template:
+    metadata:
+      labels:
+        app: quickwit
+    spec:
+      containers:
+        - name: quickwit
+          image: quickwit/quickwit:latest
+          ports:
+            - containerPort: 7280
+              name: http
+            - containerPort: 7281
+              name: grpc
+          env:
+            - name: QW_NODE_ID
+              value: "quickwit-0"
+            - name: QW_LISTEN_ADDRESS
+              value: "0.0.0.0"
+            - name: QW_GRPC_LISTEN_PORT
+              value: "7281"
+            - name: QW_REST_LISTEN_PORT
+              value: "7280"
+            - name: QW_METASTORE_URI
+              value: "file:///var/lib/quickwit/metastore"
+            - name: QW_DATA_DIR
+              value: "/var/lib/quickwit/data"
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1"
+            limits:
+              memory: "4Gi"
+              cpu: "2"
+          volumeMounts:
+            - name: quickwit-data
+              mountPath: /var/lib/quickwit
+      volumes:
+        - name: quickwit-data
+          persistentVolumeClaim:
+            claimName: quickwit-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quickwit
+  namespace: monitoring
+spec:
+  selector:
+    app: quickwit
+  ports:
+    - port: 7280
+      targetPort: 7280
+      name: http
+    - port: 7281
+      targetPort: 7281
+      name: grpc
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: quickwit-pvc
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

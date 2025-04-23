@@ -1,0 +1,38 @@
+version: 0.8
+index_id: http-events
+
+doc_mapping:
+  field_mappings:
+    - name: timestamp
+      type: datetime
+      input_formats:
+        - rfc3339
+      output_format: rfc3339
+      fast: true
+    - name: pid
+      type: u64
+    - name: tid
+      type: u64
+    - name: process_name
+      type: text
+      tokenizer: raw
+    - name: command
+      type: text
+      tokenizer: raw
+    - name: type
+      type: u64
+    - name: data_len
+      type: u64
+    - name: conn_id
+      type: text
+      tokenizer: raw
+    - name: data
+      type: json
+      tokenizer: raw
+  timestamp_field: timestamp
+
+search_settings:
+  default_search_fields: [process_name, command]
+
+indexing_settings:
+  commit_timeout_secs: 10

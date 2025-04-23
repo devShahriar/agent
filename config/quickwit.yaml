@@ -1,0 +1,8 @@
+version: 0.8
+node_id: quickwit-0
+cluster_id: quickwit-cluster
+peer_seeds: []
+metastore_uri: file:///var/lib/quickwit/metastore
+data_dir: /var/lib/quickwit/data
+rest_listen_port: 7280
+grpc_listen_port: 7281

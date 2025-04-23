@@ -1,0 +1,16 @@
+version: 0.8
+source_id: kafka-source
+source_type: kafka
+num_pipelines: 2
+input_format: json
+params:
+  topic: http-events
+  client_params:
+    bootstrap.servers: "broker1:9092,broker2:9092"
+    group.id: quickwit-consumer
+    auto.offset.reset: earliest
+    enable.auto.commit: "true"
+    auto.commit.interval.ms: "5000"
+    session.timeout.ms: "10000"
+    heartbeat.interval.ms: "3000"
+    client.id: quickwit-kafka-consumer

@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: automq
+  namespace: monitoring
+spec:
+  serviceName: automq
+  replicas: 1
+  selector:
+    matchLabels:
+      app: automq
+  template:
+    metadata:
+      labels:
+        app: automq
+    spec:
+      containers:
+        - name: automq
+          image: automq/automq:latest
+          ports:
+            - containerPort: 9092
+              name: kafka
+            - containerPort: 8080
+              name: metrics
+          env:
+            - name: KAFKA_BROKER_ID
+              value: "1"
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://0.0.0.0:9092"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://automq:9092"
+            - name: KAFKA_ZOOKEEPER_CONNECT
+              value: "automq:2181"
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1"
+            limits:
+              memory: "4Gi"
+              cpu: "2"
+          volumeMounts:
+            - name: automq-data
+              mountPath: /var/lib/automq
+      volumes:
+        - name: automq-data
+          persistentVolumeClaim:
+            claimName: automq-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: automq
+  namespace: monitoring
+spec:
+  selector:
+    app: automq
+  ports:
+    - port: 9092
+      targetPort: 9092
+      name: kafka
+    - port: 8080
+      targetPort: 8080
+      name: metrics
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: automq-pvc
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

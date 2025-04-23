@@ -1,22 +1,52 @@
 version: "3.8"
 
 services:
-  dev:
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
-    volumes:
-      - .:/app
-      - go-cache:/go
+  # automq:
+  #   image: automq/automq:latest
+  #   ports:
+  #     - "9092:9092" # Kafka
+  #     - "8080:8080" # Metrics
+  #   environment:
+  #     - KAFKA_BROKER_ID=1
+  #     - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092
+  #     - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://automq:9092
+  #     - KAFKA_ZOOKEEPER_CONNECT=automq:2181
+  #   volumes:
+  #     - automq-data:/var/lib/automq
+  #   healthcheck:
+  #     test:
+  #       [
+  #         "CMD",
+  #         "kafka-topics.sh",
+  #         "--bootstrap-server",
+  #         "localhost:9092",
+  #         "--list",
+  #       ]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 3
+
+  quickwit:
+    image: quickwit/quickwit:latest
+    command: run --config=/quickwit/config/quickwit.yaml
     ports:
-      - "8080:8080"
-    privileged: true
-    cap_add:
-      - SYS_PTRACE
-      - NET_ADMIN
-      - SYS_ADMIN
-    security_opt:
-      - seccomp=unconfined
+      - "7280:7280" # HTTP
+      - "7281:7281" # gRPC
+    volumes:
+      - ./config/quickwit.yaml:/quickwit/config/quickwit.yaml
+      - quickwit-data:/var/lib/quickwit
+    networks:
+      - automq_net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # depends_on:
+    #   automq:
+    #     condition: service_healthy
+
+networks:
+  automq_net:
+    external: true
 
 volumes:
-  go-cache:
+  # automq-data:
+  quickwit-data:

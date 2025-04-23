@@ -1,0 +1,57 @@
+version: 0.8
+source_id: kafka-source
+source_type: kafka
+params:
+  topic: http-events
+  bootstrap_servers: "host.docker.internal:9094"
+  group_id: quickwit-consumer
+  auto_offset_reset: earliest
+  enable_auto_commit: true
+  auto_commit_interval_ms: 5000
+  max_poll_interval_ms: 300000
+  session_timeout_ms: 10000
+  heartbeat_interval_ms: 3000
+  max_poll_records: 500
+  fetch_max_bytes: 52428800
+  fetch_min_bytes: 1
+  fetch_max_wait_ms: 500
+  connections_max_idle_ms: 540000
+  request_timeout_ms: 40000
+  retry_backoff_ms: 100
+  metadata_max_age_ms: 300000
+  metadata_max_idle_ms: 300000
+  max_partition_fetch_bytes: 1048576
+  receive_buffer_bytes: 65536
+  send_buffer_bytes: 131072
+  client_id: quickwit-kafka-consumer
+  client_rack: ""
+  reconnect_backoff_ms: 50
+  reconnect_backoff_max_ms: 1000
+  retry_backoff_ms: 100
+  isolation_level: read_committed
+  enable_auto_commit: true
+  auto_commit_interval_ms: 5000
+  check_crcs: true
+  exclude_internal_topics: true
+  max_partition_fetch_bytes: 1048576
+  max_poll_records: 500
+  max_poll_interval_ms: 300000
+  session_timeout_ms: 10000
+  heartbeat_interval_ms: 3000
+  fetch_max_bytes: 52428800
+  fetch_min_bytes: 1
+  fetch_max_wait_ms: 500
+  connections_max_idle_ms: 540000
+  request_timeout_ms: 40000
+  retry_backoff_ms: 100
+  metadata_max_age_ms: 300000
+  metadata_max_idle_ms: 300000
+  max_partition_fetch_bytes: 1048576
+  receive_buffer_bytes: 65536
+  send_buffer_bytes: 131072
+  client_id: quickwit-kafka-consumer
+  client_rack: ""
+  reconnect_backoff_ms: 50
+  reconnect_backoff_max_ms: 1000
+  retry_backoff_ms: 100
+  isolation_level: read_committed 
